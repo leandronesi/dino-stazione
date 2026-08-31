@@ -1730,12 +1730,11 @@ var A = window.A = window.A || {};
 
     for (var i = 0; i < S.tracks; i++) (function (idx) {
       var pulse = S.hint === idx ? 1 + Math.sin(G.t * 7) * .08 : 1;
-      c.save(); c.translate(105, TRACK_Y[idx]); c.scale(pulse, pulse);
       G.ui.round({
-        id: 'route-' + idx, x: 0, y: 0, r: 46, color: TRACK_COL[idx],
+        id: 'route-' + idx, x: 105, y: TRACK_Y[idx], r: 46 * pulse, color: TRACK_COL[idx],
         icon: function (cc, x, y) { A.destination(cc, x, y, 25, idx); },
         onTap: function () { choose(idx); }
-      }); c.restore();
+      });
       var occ = S.occupied[idx];
       A.signal(c, 1085, TRACK_Y[idx] - 18, 34, !!(occ && occ.ready));
       G.ui.round({

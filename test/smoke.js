@@ -89,6 +89,10 @@ const G = W.G;
 function pump(n) {
   for (let i = 0; i < n; i++) { clock += 16.7; flushTimers(); try { W.raf(clock); } catch (e) { fail('frame: ' + e.message); } }
 }
+function tap(x, y) {
+  const e = { clientX: G.view.ox + x * G.view.s, clientY: G.view.oy + y * G.view.s, pointerId: 1, preventDefault: noop };
+  els.c.dispatch('pointerdown', e); pump(1); els.c.dispatch('pointerup', e); pump(1);
+}
 
 console.log('Dino Stazione — collaudo headless');
 console.log('moduli: ' + files.join(', ') + '\n');
@@ -98,6 +102,13 @@ if (!G.accounts.login(a.id)) fail('login fallito');
 G.start('menu'); pump(40);
 if (G.current !== 'menu') fail('menu non raggiunto');
 if (drawCount < 300) fail('menu quasi vuoto');
+
+phase = 'area touch binario';
+G.start('stazione', { level: 1 }); pump(20);
+tap(105, 312);
+if (!G.stationState().active || G.stationState().active.phase !== 'moving') {
+  fail('il pulsante visibile del binario non riceve il tap reale');
+}
 
 function completeLevel(level) {
   phase = 'turno ' + level;
