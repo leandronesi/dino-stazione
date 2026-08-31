@@ -24,3 +24,7 @@ node test/smoke.js
 ```
 
 `src/` contiene moduli JavaScript ordinati e concatenati dal build in un unico `index.html`. La PWA include profili separati, salvataggio locale e service worker offline.
+
+## Sito pubblico
+
+Il workflow `.github/workflows/deploy.yml` pubblica automaticamente ogni push su `main` su `https://leandronesi.github.io/dino-stazione/`. La prima volta, in **Settings → Pages**, la sorgente deve essere impostata su **GitHub Actions**.
