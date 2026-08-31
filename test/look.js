@@ -43,7 +43,10 @@ async function main() {
   await call('Page.enable'); await call('Runtime.enable'); await delay(700);
   const setup = await call('Runtime.evaluate', { expression: "(function(){var a=G.accounts.create({name:'Prova',color:G.C.berry,level:2});G.accounts.login(a.id);G.start('stazione',{level:12});return G.current;})()", returnByValue: true });
   if (setup.exceptionDetails) throw new Error('Setup pagina fallito');
-  await delay(1700);
+  await delay(250);
+  const routes = await call('Runtime.evaluate', { expression: "(function(){var s=G.stationState();s.actives.forEach(function(t){G.stationTapTrain(t.id);G.stationChoose(t.target);});return G.stationState().actives.length;})()", returnByValue: true });
+  if (routes.exceptionDetails) throw new Error('Avvio dei treni fallito');
+  await delay(650);
   const shot = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
   const dir = path.join(__dirname, 'frames'); fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'stazione-livello-12.png'); fs.writeFileSync(file, Buffer.from(shot.data, 'base64'));

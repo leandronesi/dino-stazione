@@ -1600,12 +1600,12 @@ var A = window.A = window.A || {};
   var TRACK_NAME = ['Sole', 'Mare', 'Bosco'];
   /* Una regola nuova alla volta: binari, coda e direzione arrivano gradualmente. */
   var LEVELS = [
-    { tracks: 1, total: 3 }, { tracks: 2, total: 3 },
-    { tracks: 2, total: 4 }, { tracks: 3, total: 4 },
-    { tracks: 3, total: 5, queue: true }, { tracks: 3, total: 5, queue: true, both: true },
-    { tracks: 3, total: 6, queue: true, both: true }, { tracks: 3, total: 6, queue: true, both: true },
-    { tracks: 3, total: 7, queue: true, both: true }, { tracks: 3, total: 7, queue: true, both: true },
-    { tracks: 3, total: 8, queue: true, both: true }, { tracks: 3, total: 8, queue: true, both: true }
+    { tracks: 1, total: 3, maxIncoming: 1 }, { tracks: 2, total: 3, maxIncoming: 1 },
+    { tracks: 2, total: 4, maxIncoming: 1 }, { tracks: 3, total: 4, maxIncoming: 1 },
+    { tracks: 3, total: 5, cross: true, maxIncoming: 1 }, { tracks: 3, total: 5, cross: true, both: true, maxIncoming: 1 },
+    { tracks: 3, total: 6, cross: true, both: true, maxIncoming: 2 }, { tracks: 3, total: 6, cross: true, both: true, maxIncoming: 2 },
+    { tracks: 3, total: 7, cross: true, both: true, maxIncoming: 2 }, { tracks: 3, total: 7, cross: true, both: true, maxIncoming: 3 },
+    { tracks: 3, total: 8, cross: true, both: true, maxIncoming: 3 }, { tracks: 3, total: 8, cross: true, both: true, maxIncoming: 3 }
   ];
   var MAX_LEVEL = LEVELS.length;
   var S = {};
@@ -1616,8 +1616,8 @@ var A = window.A = window.A || {};
     var n = plan.tracks, total = plan.total;
     S = {
       level: level, tracks: n, total: total, schedule: [], next: 0,
-      active: null, occupied: [null, null, null], departing: [],
-      arrived: 0, departed: 0, mistakes: 0, hint: -1, idle: 0,
+      active: [], focus: null, occupied: [null, null, null], departing: [],
+      arrived: 0, departed: 0, mistakes: 0, waits: 0, collisions: 0, hint: -1, idle: 0,
       message: 'Tocca il trenino', fine: false, reward: false, plan: plan
     };
     var last = -1;
@@ -1631,36 +1631,68 @@ var A = window.A = window.A || {};
   }
 
   function spawn() {
-    if (S.active || S.next >= S.schedule.length || S.fine) return;
-    if (!S.plan.queue && S.occupied.some(function (v) { return !!v; })) return;
-    var q = S.schedule[S.next++];
-    S.active = {
+    if (S.next >= S.schedule.length || S.fine || S.active.length >= S.plan.maxIncoming) return;
+    if (S.plan.maxIncoming === 1 && S.occupied.some(function (v) { return !!v; })) return;
+    var q = S.schedule[S.next++], lane = S.active.length;
+    S.active.push({
       target: q.target, dir: q.dir, id: q.id, phase: 'choose', p: 0,
-      x: q.dir === 1 ? 118 : W - 118, y: 206,
+      x: q.dir === 1 ? 118 : W - 118, y: 210 + lane * 48, sourceY: 210 + lane * 48, lane: lane,
       color: TRACK_COL[q.target]
-    };
-    S.message = S.occupied[q.target] ? 'Quel binario è occupato: fallo ripartire!' : 'Dove deve arrivare?';
-    S.message = 'Tocca il trenino per guardare dove va';
+    });
+    S.message = S.active.length > 1 ? 'Scegli un trenino da preparare' : 'Tocca il trenino per guardare dove va';
     S.idle = 0; S.hint = -1;
-    if (S.level === 1) setTimeout(function () { if (G.current === 'stazione' && S.active) G.say('Tocca il trenino!'); }, 300);
+    if (S.level === 1) setTimeout(function () { if (G.current === 'stazione' && S.active.length) G.say('Tocca il trenino!'); }, 300);
+  }
+
+  function fillIncoming() {
+    while (!S.fine && S.next < S.schedule.length && S.active.length < S.plan.maxIncoming) {
+      var before = S.active.length; spawn();
+      if (S.active.length === before) break;
+    }
+  }
+
+  function focusedTrain() {
+    for (var i = 0; i < S.active.length; i++) if (S.active[i].id === S.focus) return S.active[i];
+    for (var j = 0; j < S.active.length; j++) if (S.active[j].phase === 'choose-route') return S.active[j];
+    return null;
+  }
+
+  function trackFreeFor(t) {
+    if (S.occupied[t.target]) return false;
+    for (var i = 0; i < S.active.length; i++) {
+      var other = S.active[i];
+      /* L'incrocio e' una risorsa unica: un solo convoglio lo attraversa,
+         gli altri restano visibili in attesa del loro verde. */
+      if (S.plan.cross && other !== t && other.phase === 'moving') return false;
+      if (other !== t && other.target === t.target &&
+          (other.phase === 'moving' || (other.phase === 'waiting' && other.id < t.id))) return false;
+    }
+    return true;
+  }
+
+  function startMoving(t) {
+    t.phase = 'moving'; t.p = 0; S.hint = -1;
+    S.message = 'Via libera: ' + TRACK_NAME[t.target] + ' passa per primo'; G.sfx('good');
   }
 
   function choose(track) {
-    if (!S.active || S.active.phase !== 'choose-route' || S.fine) return false;
+    var t = focusedTrain();
+    if (!t || t.phase !== 'choose-route' || S.fine) return false;
     S.idle = 0;
-    if (track !== S.active.target) {
-      S.mistakes++; S.hint = S.active.target; S.message = 'Quasi! Cerca il simbolo ' + TRACK_NAME[S.active.target];
+    if (track !== t.target) {
+      S.mistakes++; S.hint = t.target; S.message = 'Quasi! Cerca il simbolo ' + TRACK_NAME[t.target];
       G.sfx('pop'); G.fx.text(205, TRACK_Y[track] || 330, '↩', C.tangerine, 54);
-      G.say('Quasi! Cerca ' + TRACK_NAME[S.active.target] + '.');
+      G.say('Quasi! Cerca ' + TRACK_NAME[t.target] + '.');
       return false;
     }
-    if (S.occupied[track]) {
-      S.hint = track; S.message = 'Prima dai il via al treno sul binario!'; G.sfx('chime');
-      G.say('Prima fai partire il treno che è già lì.');
-      return false;
+    S.focus = null;
+    if (trackFreeFor(t)) {
+      startMoving(t);
+      return true;
     }
-    S.active.phase = 'moving'; S.active.p = 0; S.hint = -1;
-    S.message = 'Scambio giusto! Il treno sta arrivando'; G.sfx('good');
+    if (!t.wasWaiting) { t.wasWaiting = true; S.waits++; }
+    t.phase = 'waiting'; S.hint = track;
+    S.message = 'Binario occupato: questo trenino aspetta il suo turno'; G.sfx('chime');
     return true;
   }
 
@@ -1669,15 +1701,19 @@ var A = window.A = window.A || {};
   function tapTrain(t, track) {
     if (S.fine || !t) return false;
     S.idle = 0;
-    if (t === S.active) {
+    if (S.active.indexOf(t) >= 0) {
       if (t.phase === 'choose') {
-        t.phase = 'choose-route'; S.hint = t.target;
+        t.phase = 'choose-route'; S.focus = t.id; S.hint = t.target;
         S.message = 'Guarda il simbolo e scegli il binario'; G.sfx('tap');
         if (S.level === 1) G.say(TRACK_NAME[t.target] + '. Tocca quel simbolo.');
         return true;
       }
       if (t.phase === 'choose-route') {
-        S.message = 'Ora tocca il simbolo uguale'; S.hint = t.target;
+        S.focus = t.id; S.message = 'Ora tocca il simbolo uguale'; S.hint = t.target;
+        return true;
+      }
+      if (t.phase === 'waiting') {
+        S.message = 'Aspetta: passa prima chi ha il binario libero'; G.sfx('tap');
         return true;
       }
       return false;
@@ -1698,14 +1734,16 @@ var A = window.A = window.A || {};
     S.occupied[track] = null; t.phase = 'departing'; t.p = 0;
     S.departing.push(t); S.departed++; S.message = 'Via libera! Buon viaggio!';
     G.sfx('win'); G.fx.confetti(1080, TRACK_Y[track], TRACK_COL[track], 12);
-    if (!S.plan.queue) spawn();
-    if (S.active && S.active.target === track) S.hint = track;
+    for (var i = 0; i < S.active.length; i++) {
+      if (S.active[i].phase === 'waiting' && trackFreeFor(S.active[i])) startMoving(S.active[i]);
+    }
+    fillIncoming();
     checkDone();
     return true;
   }
 
   function checkDone() {
-    if (S.departed < S.total || S.active || S.occupied.some(function (v) { return !!v; })) return;
+    if (S.departed < S.total || S.active.length || S.occupied.some(function (v) { return !!v; })) return;
     S.fine = true; S.message = 'Turno completato! Tutti i treni sono partiti';
     if (!S.reward) {
       S.reward = true;
@@ -1720,35 +1758,61 @@ var A = window.A = window.A || {};
   function update(dt) {
     if (S.fine) return;
     S.idle += dt;
-    if (S.active && S.active.phase === 'choose' && S.idle > (S.level === 1 ? 2.6 : 4.5)) S.hint = -2;
-    if (S.active && S.active.phase === 'choose-route' && S.idle > 2.2) S.hint = S.active.target;
-    if (S.active && S.active.phase === 'moving') {
-      var a = S.active; a.p += dt / 1.15;
+    updateTrains(dt);
+  }
+
+  function updateTrains(dt) {
+    S.active.forEach(function (a) {
+      if (a.phase === 'choose' && S.idle > (S.level === 1 ? 2.6 : 4.5)) S.hint = -2;
+      if (a.phase === 'choose-route' && S.focus === a.id && S.idle > 2.2) S.hint = a.target;
+      if (a.phase === 'waiting' && trackFreeFor(a)) startMoving(a);
+    });
+    for (var ai = S.active.length - 1; ai >= 0; ai--) {
+      var a = S.active[ai];
+      if (a.phase !== 'moving') continue;
+      a.p += dt / 1.15;
       var e = G.easeInOut(a.p), sx = a.dir === 1 ? 118 : W - 118;
-      a.x = G.lerp(sx, 660, e); a.y = G.lerp(206, TRACK_Y[a.target], e);
+      a.x = G.lerp(sx, 660, e); a.y = G.lerp(a.sourceY, TRACK_Y[a.target], e);
       if (a.p >= 1) {
         a.x = 660; a.y = TRACK_Y[a.target]; a.phase = 'parked'; a.dwell = S.level === 1 ? .45 : .8; a.ready = false;
-        S.occupied[a.target] = a; S.active = null; S.arrived++;
-        S.message = 'Aspettiamo i passeggeri…';
-        if (S.plan.queue) spawn();
+        S.occupied[a.target] = a; S.active.splice(ai, 1); S.arrived++;
+        if (S.focus === a.id) S.focus = null;
+        S.message = 'Aspettiamo i passeggeri...';
       }
     }
     S.occupied.forEach(function (t, i) {
       if (!t || t.ready) return;
       t.dwell -= dt;
-      if (t.dwell <= 0) { t.ready = true; S.message = 'Passeggeri pronti! Tocca il trenino per farlo partire'; G.sfx('chime'); if (S.level === 1) G.say('Passeggeri pronti! Tocca il trenino.'); }
+      if (t.dwell <= 0) {
+        t.ready = true; S.message = 'Passeggeri pronti! Tocca il trenino per farlo partire'; G.sfx('chime');
+        if (S.level === 1) G.say('Passeggeri pronti! Tocca il trenino.');
+      }
     });
     for (var i = S.departing.length - 1; i >= 0; i--) {
       var d = S.departing[i]; d.p += dt / 1.05;
       d.x = G.lerp(660, d.dir === 1 ? W + 180 : -180, G.easeIn(d.p));
       if (d.p >= 1) S.departing.splice(i, 1);
     }
-    if (!S.active) spawn();
+    fillIncoming();
     checkDone();
   }
 
   function rails(c) {
     c.fillStyle = '#d4bf95'; c.fillRect(0, 202, W, H - 202);
+    if (S.plan.cross) {
+      c.save();
+      c.strokeStyle = '#62594e'; c.lineWidth = 8;
+      c.beginPath(); c.moveTo(360, 255); c.lineTo(850, 545); c.stroke();
+      c.beginPath(); c.moveTo(360, 545); c.lineTo(850, 255); c.stroke();
+      c.strokeStyle = '#8b765b'; c.lineWidth = 5;
+      for (var crossX = 430; crossX < 825; crossX += 58) {
+        var crossY = 255 + (crossX - 360) * 290 / 490;
+        c.beginPath(); c.moveTo(crossX - 12, crossY + 12); c.lineTo(crossX + 12, crossY - 12); c.stroke();
+      }
+      c.fillStyle = 'rgba(255,246,224,.94)'; G.roundRect(c, 830, 650, 390, 44, 18); c.fill();
+      G.text('INCROCIO: passa chi ha il verde', 1025, 672, { ctx: c, size: 18, color: C.ink });
+      c.restore();
+    }
     for (var i = 0; i < S.tracks; i++) {
       var y = TRACK_Y[i];
       c.fillStyle = 'rgba(255,255,255,.44)'; G.roundRect(c, 172, y - 53, 835, 106, 20); c.fill();
@@ -1770,7 +1834,7 @@ var A = window.A = window.A || {};
     c.fillStyle = 'rgba(255,246,224,.94)'; G.roundRect(c, 310, 154, 660, 62, 24); c.fill();
     G.text(S.message, 640, 185, { ctx: c, size: 25, color: C.ink, maxWidth: 620 });
 
-    var routing = S.active && S.active.phase === 'choose-route';
+    var routing = !!focusedTrain();
     for (var i = 0; i < S.tracks; i++) (function (idx) {
       var pulse = routing && S.hint === idx ? 1 + Math.sin(G.t * 7) * .08 : 1;
       G.ui.round({
@@ -1793,15 +1857,19 @@ var A = window.A = window.A || {};
       }
     });
     S.departing.forEach(function (t) { A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir }); });
-    if (S.active) {
-      A.train(c, S.active.x, S.active.y, 125, { color: S.active.color, kind: S.active.target, dir: S.active.dir });
-      G.ui.button({ id: 'active-train', x: S.active.x - 92, y: S.active.y - 86, w: 184, h: 148, r: 54, ghost: true,
-        onTap: function () { tapTrain(S.active); } });
-      if (S.active.phase === 'choose') {
+    S.active.forEach(function (t) {
+      A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir });
+      G.ui.button({ id: 'active-train-' + t.id, x: t.x - 92, y: t.y - 86, w: 184, h: 148, r: 54, ghost: true,
+        onTap: function () { tapTrain(t); } });
+      if (t.phase === 'choose') {
         c.save(); c.globalAlpha = .55 + .35 * Math.sin(G.t * 6); c.strokeStyle = C.sun; c.lineWidth = 7;
-        c.beginPath(); c.arc(S.active.x, S.active.y - 10, 94, 0, 7); c.stroke(); c.restore();
+        c.beginPath(); c.arc(t.x, t.y - 10, 94, 0, 7); c.stroke(); c.restore();
       }
-    }
+      if (t.phase === 'waiting') {
+        c.save(); c.globalAlpha = .8; c.strokeStyle = C.tangerine; c.lineWidth = 6;
+        c.beginPath(); c.arc(t.x, t.y - 10, 88, 0, 7); c.stroke(); c.restore();
+      }
+    });
 
     if (S.plan.both && S.next < S.schedule.length) {
       c.fillStyle = 'rgba(255,246,224,.92)'; G.roundRect(c, W - 205, 112, 165, 92, 22); c.fill();
@@ -1824,17 +1892,26 @@ var A = window.A = window.A || {};
   }
 
   G.stationState = function () {
+    var focused = focusedTrain() || S.active[0];
     return {
       level: S.level, tracks: S.tracks, total: S.total, next: S.next,
-      active: S.active && { target: S.active.target, phase: S.active.phase },
+      cross: !!S.plan.cross, maxIncoming: S.plan.maxIncoming,
+      active: focused && { id: focused.id, target: focused.target, phase: focused.phase },
+      actives: S.active.map(function (t) { return { id: t.id, target: t.target, phase: t.phase }; }),
+      activeCount: S.active.length,
+      moving: S.active.filter(function (t) { return t.phase === 'moving'; }).length,
+      waiting: S.active.filter(function (t) { return t.phase === 'waiting'; }).length,
       occupied: S.occupied.map(function (t) { return t && { ready: t.ready, target: t.target }; }),
-      arrived: S.arrived, departed: S.departed, mistakes: S.mistakes, fine: S.fine
+      arrived: S.arrived, departed: S.departed, mistakes: S.mistakes, waits: S.waits,
+      collisions: S.collisions, fine: S.fine
     };
   };
   G.stationChoose = choose;
   G.stationDepart = depart;
-  G.stationTapTrain = function () {
-    if (S.active) return tapTrain(S.active);
+  G.stationTapTrain = function (id) {
+    for (var a = 0; a < S.active.length; a++) {
+      if (id === undefined || S.active[a].id === id) return tapTrain(S.active[a]);
+    }
     for (var i = 0; i < S.occupied.length; i++) if (S.occupied[i]) return tapTrain(S.occupied[i], i);
     return false;
   };

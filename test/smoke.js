@@ -118,11 +118,22 @@ if (!G.stationState().active || G.stationState().active.phase !== 'moving') {
 function completeLevel(level) {
   phase = 'turno ' + level;
   G.start('stazione', { level }); pump(20);
-  let guard = 0;
+  let guard = 0, maxConcurrent = 0, maxMoving = 0, sawWaiting = false;
   while (!G.stationState().fine && guard++ < 5000) {
     const s = G.stationState();
-    if (s.active && s.active.phase === 'choose') G.stationTapTrain();
-    if (s.active && s.active.phase === 'choose-route') G.stationChoose(s.active.target);
+    maxConcurrent = Math.max(maxConcurrent, s.activeCount || 0);
+    maxMoving = Math.max(maxMoving, s.moving || 0);
+    sawWaiting = sawWaiting || (s.waiting || 0) > 0;
+    (s.actives || []).forEach(t => {
+      if (t.phase === 'choose') {
+        G.stationTapTrain(t.id);
+        const opened = (G.stationState().actives || []).find(x => x.id === t.id);
+        if (opened && opened.phase === 'choose-route') G.stationChoose(opened.target);
+      } else if (t.phase === 'choose-route') {
+        G.stationTapTrain(t.id);
+        G.stationChoose(t.target);
+      }
+    });
     s.occupied.forEach((t, i) => { if (t && t.ready) G.stationDepart(i); });
     pump(1);
   }
@@ -130,6 +141,12 @@ function completeLevel(level) {
   if (!end.fine) fail('turno non finito entro il limite');
   if (end.departed !== end.total) fail('partiti ' + end.departed + ' su ' + end.total);
   if (end.arrived !== end.total) fail('arrivati ' + end.arrived + ' su ' + end.total);
+  if (end.collisions !== 0) fail('collisioni registrate: ' + end.collisions);
+  if (level >= 5 && !end.cross) fail('incrocio non attivo al turno ' + level);
+  if (level >= 5 && maxMoving > 1) fail('due treni attraversano insieme l incrocio al turno ' + level);
+  if (level >= 7 && maxConcurrent < 2) fail('mancano due trenini contemporanei al turno ' + level);
+  if (level >= 10 && maxConcurrent < 3) fail('mancano tre trenini contemporanei al turno ' + level);
+  if (level >= 10 && !sawWaiting) fail('nessun treno rispetta la precedenza al turno ' + level);
 }
 completeLevel(1);
 pump(2);

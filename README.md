@@ -11,8 +11,15 @@ I primi turni introducono una regola alla volta; oggi la progressione continua f
 1. un solo binario e aiuto vocale rapido;
 2. due binari da distinguere;
 3. tre destinazioni;
-4. più treni contemporaneamente e binari da liberare;
-5. treni da entrambe le direzioni e anteprima del prossimo arrivo.
+4. tre destinazioni da scegliere con calma;
+5. un incrocio guidato: passa chi ha la via libera;
+6. arrivi da entrambe le direzioni;
+7. due trenini insieme;
+8. fino a tre trenini nei turni finali.
+
+Dal turno 5 compare un incrocio visibile e guidato. Dal turno 7 arrivano due
+trenini insieme, fino a tre nei turni finali: chi trova una via occupata aspetta
+con un bordo arancione e il messaggio spiega chi ha la precedenza.
 
 Non ci sono game over o attese che fanno perdere. Uno scambio sbagliato produce un suggerimento e si corregge subito.
 
