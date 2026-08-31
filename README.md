@@ -4,9 +4,9 @@ Un gioco da tablet, offline e senza dipendenze, in cui i bambini organizzano una
 
 ## Come si gioca
 
-Ogni locomotiva porta un simbolo: **Sole**, **Mare** o **Bosco**. Il bambino tocca il binario con lo stesso simbolo, aspetta che salgano i passeggeri e infine dà il via dal segnale verde.
+Ogni locomotiva porta un simbolo: **Sole**, **Mare** o **Bosco**. Il bambino tocca prima il trenino, poi il binario con lo stesso simbolo; quando i passeggeri sono pronti tocca di nuovo il trenino per farlo partire.
 
-I cinque turni introducono una regola alla volta:
+I primi turni introducono una regola alla volta; oggi la progressione continua fino al turno 12:
 
 1. un solo binario e aiuto vocale rapido;
 2. due binari da distinguere;
@@ -15,6 +15,18 @@ I cinque turni introducono una regola alla volta:
 5. treni da entrambe le direzioni e anteprima del prossimo arrivo.
 
 Non ci sono game over o attese che fanno perdere. Uno scambio sbagliato produce un suggerimento e si corregge subito.
+
+## Flusso di gioco e progressione
+
+Il trenino e' sempre il primo oggetto da toccare. Quando arriva, pulsa e dice
+visivamente di essere il protagonista; toccandolo si aprono i grandi simboli dei
+binari. Quando i passeggeri sono pronti, si tocca di nuovo il trenino per farlo
+partire. Il semaforo conferma il verde, ma non e' un comando nascosto.
+
+Ci sono 12 turni salvati per profilo. I primi quattro introducono uno, due e tre
+binari; poi arrivano una piccola coda di treni e gli arrivi da entrambe le
+direzioni. Alla fine di ogni turno compaiono sempre Riprova, Prossimo e Deposito.
+Il menu mostra chiaramente i turni sbloccati.
 
 ## Sviluppo
 

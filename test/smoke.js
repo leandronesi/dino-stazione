@@ -103,11 +103,16 @@ G.start('menu'); pump(40);
 if (G.current !== 'menu') fail('menu non raggiunto');
 if (drawCount < 300) fail('menu quasi vuoto');
 
-phase = 'area touch binario';
+phase = 'tocca il trenino';
 G.start('stazione', { level: 1 }); pump(20);
+tap(118, 206);
+if (!G.stationState().active || G.stationState().active.phase !== 'choose-route') {
+  fail('toccando il trenino non si apre la scelta del binario');
+}
+pump(2); // un frame registra i binari appena aperti per il secondo tocco reale
 tap(105, 312);
 if (!G.stationState().active || G.stationState().active.phase !== 'moving') {
-  fail('il pulsante visibile del binario non riceve il tap reale');
+  fail('il binario non riceve il tap dopo aver toccato il trenino');
 }
 
 function completeLevel(level) {
@@ -116,7 +121,8 @@ function completeLevel(level) {
   let guard = 0;
   while (!G.stationState().fine && guard++ < 5000) {
     const s = G.stationState();
-    if (s.active && s.active.phase === 'choose') G.stationChoose(s.active.target);
+    if (s.active && s.active.phase === 'choose') G.stationTapTrain();
+    if (s.active && s.active.phase === 'choose-route') G.stationChoose(s.active.target);
     s.occupied.forEach((t, i) => { if (t && t.ready) G.stationDepart(i); });
     pump(1);
   }
@@ -125,11 +131,18 @@ function completeLevel(level) {
   if (end.departed !== end.total) fail('partiti ' + end.departed + ' su ' + end.total);
   if (end.arrived !== end.total) fail('arrivati ' + end.arrived + ' su ' + end.total);
 }
-for (let level = 1; level <= 5; level++) completeLevel(level);
+completeLevel(1);
+pump(2);
+tap(640, 538); // Prossimo! nella schermata completata
+pump(4);
+if (G.stationState().level !== 2 || G.stationState().fine) fail('Prossimo non apre il turno 2');
+for (let level = 2; level <= 12; level++) completeLevel(level);
 
 phase = 'errore dolce';
 G.start('stazione', { level: 3 }); pump(20);
 let s = G.stationState();
+G.stationTapTrain();
+if (G.stationState().active.phase !== 'choose-route') fail('il treno non resta il primo passo anche al livello 3');
 const wrong = (s.active.target + 1) % s.tracks;
 if (G.stationChoose(wrong)) fail('un binario sbagliato è stato accettato');
 if (G.stationState().mistakes !== 1) fail('errore non registrato');
@@ -139,12 +152,12 @@ if (!G.stationState().occupied.some(Boolean)) fail('il treno corretto non arriva
 
 phase = 'salvataggio';
 const save = G.stationSave();
-if (save.maxLevel !== 5) fail('progressione non sblocca tutti i turni: ' + save.maxLevel);
-if (save.served < 24) fail('treni serviti non salvati: ' + save.served);
+if (save.maxLevel !== 12) fail('progressione non sblocca tutti i turni: ' + save.maxLevel);
+if (save.served < 66) fail('treni serviti non salvati: ' + save.served);
 try { const j = JSON.stringify(G.save); if (/NaN|Infinity/.test(j)) fail('salvataggio non finito'); } catch (e) { fail('salvataggio non serializzabile'); }
 
 console.log('');
 if (failures.length) {
   console.log('✗ ' + failures.length + ' problemi:\n'); failures.slice(0, 40).forEach(x => console.log('  · ' + x)); process.exit(1);
 }
-console.log('✓ collaudo pulito — 5 turni, scambi, segnali e progressione');
+console.log('✓ collaudo pulito — 12 turni, tocchi sul treno, scambi e progressione');

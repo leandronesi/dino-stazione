@@ -41,13 +41,13 @@ async function main() {
   ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); } };
   function call(method, params) { return new Promise((resolve, reject) => { const id = ++seq; pending.set(id, m => m.error ? reject(new Error(m.error.message)) : resolve(m.result)); ws.send(JSON.stringify({ id, method, params: params || {} })); }); }
   await call('Page.enable'); await call('Runtime.enable'); await delay(700);
-  const setup = await call('Runtime.evaluate', { expression: "(function(){var a=G.accounts.create({name:'Prova',color:G.C.berry,level:2});G.accounts.login(a.id);G.start('stazione',{level:5});return G.current;})()", returnByValue: true });
+  const setup = await call('Runtime.evaluate', { expression: "(function(){var a=G.accounts.create({name:'Prova',color:G.C.berry,level:2});G.accounts.login(a.id);G.start('stazione',{level:12});return G.current;})()", returnByValue: true });
   if (setup.exceptionDetails) throw new Error('Setup pagina fallito');
   await delay(1700);
   const shot = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
   const dir = path.join(__dirname, 'frames'); fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, 'stazione-livello-5.png'); fs.writeFileSync(file, Buffer.from(shot.data, 'base64'));
-  console.log('✓ fotogramma reale salvato in test/frames/stazione-livello-5.png');
+  const file = path.join(dir, 'stazione-livello-12.png'); fs.writeFileSync(file, Buffer.from(shot.data, 'base64'));
+  console.log('✓ fotogramma reale salvato in test/frames/stazione-livello-12.png');
   ws.close(); child.kill(); server.close();
   await Promise.race([new Promise(resolve => child.once('exit', resolve)), delay(2500)]);
   for (let i = 0; i < 8; i++) {
