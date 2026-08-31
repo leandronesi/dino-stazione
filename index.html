@@ -1,0 +1,1852 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="description" content="Dino Stazione — organizza treni, binari e partenze, giocando.">
+<meta name="theme-color" content="#294c69">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Dino Stazione">
+<title>Dino Stazione</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>*, *::before, *::after { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%; width: 100%;
+  overflow: hidden; background: #0b2418;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none; user-select: none;
+  overscroll-behavior: none; touch-action: none;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+#c { position: fixed; inset: 0; display: block; touch-action: none; }
+
+/* ---- text entry overlay (only place we use DOM: we want the native keyboard) ---- */
+#ovl {
+  position: fixed; inset: 0; display: none; z-index: 10;
+  align-items: center; justify-content: center;
+  background: rgba(8, 26, 18, .72); backdrop-filter: blur(3px);
+  padding: 16px;
+}
+#ovl.on { display: flex; }
+#ovl .card {
+  background: #fff6e0; border: 6px solid #7a4a26; border-radius: 26px;
+  padding: 22px 24px; width: min(460px, 92vw);
+  box-shadow: 0 18px 40px rgba(0,0,0,.45);
+}
+#ovl h2 { margin: 0 0 14px; font-size: 24px; color: #2b1d12; font-weight: 800; }
+#ovl input {
+  width: 100%; font-size: 26px; padding: 12px 14px; border-radius: 14px;
+  border: 4px solid #cdb389; background: #fffdf6; color: #2b1d12;
+  font-family: inherit; font-weight: 700; outline: none;
+}
+#ovl input:focus { border-color: #2f8f4e; }
+#ovl .row { display: flex; gap: 12px; margin-top: 18px; }
+#ovl button {
+  flex: 1; font-size: 22px; font-weight: 800; padding: 14px 10px;
+  border-radius: 16px; border: none; color: #fff; font-family: inherit;
+  cursor: pointer; min-height: 60px;
+}
+#ovl .ok { background: #2f8f4e; }
+#ovl .no { background: #a8998a; }
+
+/* ---- portrait nudge ---- */
+#rot {
+  position: fixed; inset: 0; display: none; z-index: 20;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 20px; background: #123d29; color: #fff6e0; text-align: center; padding: 30px;
+}
+#rot.on { display: flex; }
+#rot .ico { font-size: 84px; animation: tilt 1.8s ease-in-out infinite; }
+#rot p { font-size: 26px; font-weight: 800; margin: 0; line-height: 1.35; }
+@keyframes tilt { 0%,100% { transform: rotate(0deg); } 50% { transform: rotate(-90deg); } }
+
+@media (prefers-reduced-motion: reduce) { #rot .ico { animation: none; } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="ovl" role="dialog" aria-modal="true">
+  <div class="card">
+    <h2 id="ovl-t">Come ti chiami?</h2>
+    <input id="ovl-i" type="text" autocomplete="off" autocapitalize="words" spellcheck="false" maxlength="14">
+    <div class="row">
+      <button class="no" id="ovl-n">Annulla</button>
+      <button class="ok" id="ovl-y">Va bene</button>
+    </div>
+  </div>
+</div>
+
+<div id="rot"><div class="ico">📱</div><p>Gira il tablet<br>di lato!</p></div>
+
+<script>
+/* ==================== 00-core.js ==================== */
+/* Dino Stazione — core engine.
+   Fixed 1280x720 logical world, letterboxed. Canvas only, no assets, no deps.
+   Everything a scene needs hangs off the global `G`. */
+(function () {
+  'use strict';
+
+  var W = 1280, H = 720;
+  var G = (window.G = { W: W, H: H, t: 0, dt: 0, frame: 0 });
+
+  /* ---------------------------------------------------------------- palette */
+  G.C = {
+    leaf: '#2f8f4e', leafDark: '#1c5c33', leafLight: '#63c777', leafDeep: '#123d29',
+    bark: '#7a4a26', barkDark: '#4e2f18',
+    sky: '#8fd8e8', skyDeep: '#4bb6d6', sun: '#ffd75e',
+    sand: '#f2d9a8', water: '#3fb6c9',
+    cream: '#fff6e0', ink: '#2b1d12', shadow: 'rgba(20,10,0,.22)',
+    berry: '#e8536b', plum: '#8f5bd6', tangerine: '#ff9f43', mint: '#38d9a9',
+    pinkPop: '#ff6fae', blueberry: '#4d80e4',
+    dino: '#57c98a', dinoDark: '#379a67', dinoBelly: '#f6e7c1'
+  };
+
+  /* ------------------------------------------------------------------ maths */
+  G.clamp = function (v, a, b) { return v < a ? a : v > b ? b : v; };
+  G.lerp = function (a, b, t) { return a + (b - a) * t; };
+  G.ease = function (t) { t = G.clamp(t, 0, 1); return 1 - Math.pow(1 - t, 3); };
+  G.easeIn = function (t) { t = G.clamp(t, 0, 1); return t * t * t; };
+  G.easeInOut = function (t) { t = G.clamp(t, 0, 1); return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+  G.easeBack = function (t) { t = G.clamp(t, 0, 1); var c = 1.70158, c3 = c + 1; return 1 + c3 * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
+  G.rnd = function (a, b) { if (b === undefined) { b = a; a = 0; } return a + Math.random() * (b - a); };
+  G.rndi = function (a, b) { return Math.floor(a + Math.random() * (b - a + 1)); };
+  G.pick = function (arr) { return arr[Math.floor(Math.random() * arr.length)]; };
+  G.shuffle = function (arr) {
+    var a = arr.slice(), i, j, t;
+    for (i = a.length - 1; i > 0; i--) { j = Math.floor(Math.random() * (i + 1)); t = a[i]; a[i] = a[j]; a[j] = t; }
+    return a;
+  };
+  G.dist = function (ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); };
+
+  /* ------------------------------------------------------------- canvas fit */
+  var cv = document.getElementById('c');
+  var ctx = (G.ctx = cv.getContext('2d', { alpha: false }));
+  var view = { s: 1, ox: 0, oy: 0, dpr: 1 };
+  G.view = view;
+  var rotEl = document.getElementById('rot');
+
+  function resize() {
+    var cw = window.innerWidth, ch = window.innerHeight;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    view.dpr = dpr;
+    view.s = Math.min(cw / W, ch / H);
+    view.ox = (cw - W * view.s) / 2;
+    view.oy = (ch - H * view.s) / 2;
+    cv.width = Math.max(1, Math.round(cw * dpr));
+    cv.height = Math.max(1, Math.round(ch * dpr));
+    cv.style.width = cw + 'px';
+    cv.style.height = ch + 'px';
+    ctx.imageSmoothingEnabled = true;
+    if (rotEl) rotEl.classList.toggle('on', ch > cw * 1.08);
+  }
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', function () { setTimeout(resize, 120); });
+  resize();
+
+  /* -------------------------------------------------------------- draw help */
+  var FONT = '"Trebuchet MS", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif';
+  G.font = function (size, weight) { return (weight || 900) + ' ' + size + 'px ' + FONT; };
+
+  G.text = function (str, x, y, o) {
+    o = o || {};
+    var c = o.ctx || ctx;
+    c.save();
+    c.font = G.font(o.size || 32, o.weight);
+    c.textAlign = o.align || 'center';
+    c.textBaseline = o.baseline || 'middle';
+    if (o.stroke) {
+      c.lineWidth = o.strokeWidth || Math.max(4, (o.size || 32) * .16);
+      c.strokeStyle = o.stroke; c.lineJoin = 'round';
+      c.strokeText(str, x, y, o.maxWidth);
+    }
+    c.fillStyle = o.color || G.C.ink;
+    c.fillText(str, x, y, o.maxWidth);
+    c.restore();
+  };
+
+  G.roundRect = function (c, x, y, w, h, r) {
+    r = Math.min(r || 0, Math.abs(w) / 2, Math.abs(h) / 2);
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  };
+  G.shadow = function (c, blur, color, dy) {
+    c.shadowBlur = blur; c.shadowColor = color || G.C.shadow;
+    c.shadowOffsetX = 0; c.shadowOffsetY = dy === undefined ? blur * .35 : dy;
+  };
+  G.noShadow = function (c) { c.shadowBlur = 0; c.shadowColor = 'transparent'; c.shadowOffsetX = 0; c.shadowOffsetY = 0; };
+
+  /* ------------------------------------------------------------------ audio */
+  var AC = null, master = null, noiseBuf = null;
+  function audio() {
+    if (AC) return AC;
+    var Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+    AC = new Ctor();
+    master = AC.createGain();
+    master.gain.value = .5;
+    master.connect(AC.destination);
+    var n = AC.createBuffer(1, AC.sampleRate * .5, AC.sampleRate), d = n.getChannelData(0), i;
+    for (i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    noiseBuf = n;
+    return AC;
+  }
+  G.resumeAudio = function () { var a = audio(); if (a && a.state === 'suspended') a.resume(); };
+
+  function tone(freq, at, dur, type, gain, slideTo) {
+    var a = audio(); if (!a) return;
+    var t0 = a.currentTime + at;
+    var o = a.createOscillator(), g = a.createGain();
+    o.type = type || 'sine';
+    o.frequency.setValueAtTime(freq, t0);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(30, slideTo), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(gain || .22, t0 + Math.min(.02, dur * .3));
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g); g.connect(master);
+    o.start(t0); o.stop(t0 + dur + .02);
+  }
+  function noise(at, dur, gain, freq) {
+    var a = audio(); if (!a || !noiseBuf) return;
+    var t0 = a.currentTime + at;
+    var s = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
+    s.buffer = noiseBuf; f.type = 'bandpass'; f.frequency.value = freq || 1400; f.Q.value = .8;
+    g.gain.setValueAtTime(gain || .18, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    s.connect(f); f.connect(g); g.connect(master);
+    s.start(t0); s.stop(t0 + dur);
+  }
+
+  var SFX = {
+    tap: function () { tone(680, 0, .07, 'sine', .16, 880); },
+    pop: function () { tone(900, 0, .12, 'sine', .2, 420); },
+    good: function () { tone(523, 0, .12, 'triangle', .2); tone(659, .09, .12, 'triangle', .2); tone(784, .18, .2, 'triangle', .22); },
+    bad: function () { tone(320, 0, .16, 'sine', .16, 240); },
+    coin: function () { tone(1180, 0, .07, 'square', .1); tone(1560, .06, .12, 'square', .1); },
+    chime: function () { tone(1046, 0, .5, 'sine', .16); tone(1568, .02, .45, 'sine', .07); },
+    whoosh: function () { noise(0, .22, .1, 900); },
+    win: function () {
+      [523, 659, 784, 1046].forEach(function (f, i) { tone(f, i * .1, .3, 'triangle', .2); });
+      tone(1318, .42, .5, 'sine', .14);
+    },
+    hatch: function () { noise(0, .1, .12, 2400); tone(600, .08, .2, 'triangle', .18, 1000); }
+  };
+  G.sfx = function (name) {
+    if (G.save && G.save.mute) return;
+    var f = SFX[name]; if (f) { audio(); if (AC) f(); }
+  };
+
+  /* ----------------------------------------------------------------- speech */
+  var voice = null, voiceTried = false;
+  function findVoice() {
+    if (!window.speechSynthesis) return null;
+    var vs = speechSynthesis.getVoices() || [];
+    if (!vs.length) return null;
+    return vs.filter(function (v) { return /^it/i.test(v.lang); })[0] || null;
+  }
+  if (window.speechSynthesis) {
+    speechSynthesis.addEventListener && speechSynthesis.addEventListener('voiceschanged', function () { voice = findVoice(); });
+  }
+  G.say = function (str, o) {
+    if (!window.speechSynthesis || !str) return;
+    if (G.save && G.save.mute) return;
+    o = o || {};
+    if (!voiceTried) { voice = findVoice(); voiceTried = true; }
+    try {
+      speechSynthesis.cancel();
+      var u = new SpeechSynthesisUtterance(String(str));
+      u.lang = 'it-IT';
+      if (voice) u.voice = voice;
+      u.rate = o.rate || .95;
+      u.pitch = o.pitch || 1.15;
+      u.volume = o.volume === undefined ? 1 : o.volume;
+      speechSynthesis.speak(u);
+    } catch (e) { /* speech is a bonus, never a blocker */ }
+  };
+  G.hush = function () { try { window.speechSynthesis && speechSynthesis.cancel(); } catch (e) {} };
+
+  /* ---------------------------------------------------------------- storage */
+  var LS = {
+    get: function (k, d) { try { var v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set: function (k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } },
+    del: function (k) { try { localStorage.removeItem(k); } catch (e) {} }
+  };
+  G.LS = LS;
+
+  var K_ACCTS = 'ds.accounts', K_LAST = 'ds.last', K_SAVE = 'ds.save.';
+
+  function blankSave() {
+    return {
+      fruits: 0, stars: 0, mute: false, hat: null, hats: [],
+      station: { maxLevel: 1, served: 0, best: {} }, seen: {}, playSec: 0, updated: 0
+    };
+  }
+  function fillSave(s) {
+    var b = blankSave(), k;
+    for (k in b) if (s[k] === undefined || s[k] === null) s[k] = b[k];
+    return s;
+  }
+
+  G.account = null;
+  G.profile = null;
+  G.level = 1;
+  G.save = blankSave();
+
+  var saveTimer = 0, saveDirty = false;
+  function writeSave() {
+    if (!G.account) return;
+    G.save.updated = Date.now();
+    LS.set(K_SAVE + G.account.id, G.save);
+    saveDirty = false;
+    if (G.cloud && G.cloud.push) G.cloud.push();
+  }
+  G.saveNow = function () { saveDirty = true; };
+  G.saveFlush = writeSave;
+
+  G.accounts = {
+    list: function () { return LS.get(K_ACCTS, []); },
+    byId: function (id) { return G.accounts.list().filter(function (a) { return a.id === id; })[0] || null; },
+    create: function (o) {
+      var list = G.accounts.list();
+      var acct = {
+        id: 'a' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36),
+        name: (o.name || 'Dino').slice(0, 14),
+        color: o.color || G.C.dino,
+        level: o.level === 2 ? 2 : 1,
+        secret: o.secret && o.secret.length ? o.secret : null,
+        created: Date.now()
+      };
+      list.push(acct);
+      LS.set(K_ACCTS, list);
+      LS.set(K_SAVE + acct.id, blankSave());
+      return acct;
+    },
+    update: function (id, patch) {
+      var list = G.accounts.list(), i;
+      for (i = 0; i < list.length; i++) if (list[i].id === id) {
+        for (var k in patch) list[i][k] = patch[k];
+        LS.set(K_ACCTS, list);
+        if (G.account && G.account.id === id) G.account = list[i];
+        return list[i];
+      }
+      return null;
+    },
+    remove: function (id) {
+      LS.set(K_ACCTS, G.accounts.list().filter(function (a) { return a.id !== id; }));
+      LS.del(K_SAVE + id);
+      if (LS.get(K_LAST, null) === id) LS.del(K_LAST);
+    },
+    login: function (id) {
+      var a = G.accounts.byId(id);
+      if (!a) return false;
+      G.account = a;
+      G.profile = a.id;
+      G.level = a.level;
+      G.save = fillSave(LS.get(K_SAVE + id, blankSave()));
+      LS.set(K_LAST, id);
+      if (G.cloud && G.cloud.pull) G.cloud.pull();
+      return true;
+    },
+    logout: function () {
+      writeSave();
+      G.hush();
+      G.account = null; G.profile = null; G.save = blankSave();
+      LS.del(K_LAST);
+    },
+    last: function () { return LS.get(K_LAST, null); }
+  };
+
+  /* ------------------------------------------------------------------ input */
+  var pointer = { x: 0, y: 0, down: false, id: null };
+  G.pointer = pointer;
+
+  function toLogical(clientX, clientY) {
+    var r = cv.getBoundingClientRect();
+    return {
+      x: (clientX - r.left - view.ox) / view.s,
+      y: (clientY - r.top - view.oy) / view.s
+    };
+  }
+
+  /* --------------------------------------------------- immediate-mode UI */
+  var uiRects = [];       // registered this frame
+  var uiHot = [];         // registered last frame (what the pointer tests against)
+  var pressedKey = null;
+  var ui = (G.ui = {});
+
+  function rectKey(o) { return o.id || (o.label || '') + '|' + Math.round(o.x) + ',' + Math.round(o.y) + ',' + Math.round(o.w) + ',' + Math.round(o.h); }
+
+  function shade(hex, amt) {
+    var m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    if (!m) return hex;
+    var f = function (h) { return G.clamp(Math.round(parseInt(h, 16) + amt), 0, 255); };
+    var to = function (v) { return ('0' + v.toString(16)).slice(-2); };
+    return '#' + to(f(m[1])) + to(f(m[2])) + to(f(m[3]));
+  }
+  G.shade = shade;
+
+  ui.button = function (o) {
+    var c = o.ctx || ctx;
+    var key = rectKey(o);
+    var down = pressedKey === key && !o.disabled;
+    var r = o.r === undefined ? Math.min(26, o.h * .32) : o.r;
+    var col = o.disabled ? '#b9ada0' : (o.color || G.C.leaf);
+    var dy = down ? 5 : 0;
+
+    c.save();
+    c.globalAlpha = o.disabled ? .72 : 1;
+    if (o.ghost) {
+      // Invisible hit area over artwork drawn by the scene (e.g. a player card).
+      if (down) {
+        c.fillStyle = 'rgba(20,10,0,.14)';
+        G.roundRect(c, o.x, o.y, o.w, o.h, r); c.fill();
+      }
+    } else {
+      // base (the "3d" underside)
+      c.fillStyle = shade(col, -48);
+      G.roundRect(c, o.x, o.y + 7, o.w, o.h, r); c.fill();
+      // face
+      var g = c.createLinearGradient(0, o.y + dy, 0, o.y + o.h + dy);
+      g.addColorStop(0, shade(col, 26)); g.addColorStop(1, col);
+      c.fillStyle = g;
+      G.roundRect(c, o.x, o.y + dy, o.w, o.h, r); c.fill();
+      // gloss
+      c.fillStyle = 'rgba(255,255,255,.20)';
+      G.roundRect(c, o.x + o.w * .06, o.y + dy + o.h * .10, o.w * .88, o.h * .30, r * .7); c.fill();
+    }
+
+    var cx = o.x + o.w / 2, cy = o.y + dy + o.h / 2;
+    if (o.icon) {
+      var isz = o.iconSize || Math.min(o.w, o.h) * .52;
+      o.icon(c, o.label ? o.x + o.h * .58 : cx, cy, isz);
+    }
+    if (o.label) {
+      var tx = o.icon ? cx + o.h * .26 : cx;
+      G.text(o.label, tx, o.sub ? cy - o.h * .12 : cy, {
+        ctx: c, size: o.fontSize || Math.min(o.h * .40, 46),
+        color: o.textColor || '#fff', stroke: o.outline || 'rgba(0,0,0,.22)',
+        maxWidth: o.w - (o.icon ? o.h * .9 : o.w * .12)
+      });
+      if (o.sub) G.text(o.sub, tx, cy + o.h * .24, { ctx: c, size: o.h * .21, color: 'rgba(255,255,255,.9)', weight: 700 });
+    }
+    c.restore();
+
+    if (!o.disabled) uiRects.push({ key: key, x: o.x, y: o.y, w: o.w, h: o.h, onTap: o.onTap, silent: o.silent, round: false });
+    return down;
+  };
+
+  ui.round = function (o) {
+    var c = o.ctx || ctx;
+    var key = o.id || 'r' + Math.round(o.x) + ',' + Math.round(o.y);
+    var down = pressedKey === key && !o.disabled;
+    var col = o.disabled ? '#b9ada0' : (o.color || G.C.cream);
+    var dy = down ? 4 : 0;
+    c.save();
+    c.globalAlpha = o.alpha === undefined ? 1 : o.alpha;
+    c.fillStyle = shade(col, -50);
+    c.beginPath(); c.arc(o.x, o.y + 6, o.r, 0, 7); c.fill();
+    c.fillStyle = col;
+    c.beginPath(); c.arc(o.x, o.y + dy, o.r, 0, 7); c.fill();
+    c.fillStyle = 'rgba(255,255,255,.25)';
+    c.beginPath(); c.arc(o.x, o.y + dy - o.r * .22, o.r * .74, Math.PI, 0); c.fill();
+    if (o.icon) o.icon(c, o.x, o.y + dy, o.r * 1.05);
+    c.restore();
+    if (!o.disabled) uiRects.push({ key: key, x: o.x - o.r, y: o.y - o.r, w: o.r * 2, h: o.r * 2, onTap: o.onTap, silent: o.silent, round: true, cx: o.x, cy: o.y, cr: o.r });
+    return down;
+  };
+
+  function hitTest(p) {
+    var i, r;
+    for (i = uiHot.length - 1; i >= 0; i--) {
+      r = uiHot[i];
+      if (r.round) { if (G.dist(p.x, p.y, r.cx, r.cy) <= r.cr + 12) return r; }
+      else if (p.x >= r.x - 6 && p.x <= r.x + r.w + 6 && p.y >= r.y - 6 && p.y <= r.y + r.h + 6) return r;
+    }
+    return null;
+  }
+
+  /* ----------------------------------------------------------------- scenes */
+  var scenes = {};
+  var cur = null, curName = '';
+  var fade = { a: 0, dir: 0, next: null, params: null };
+  G.current = '';
+
+  G.scene = function (name, obj) { scenes[name] = obj; obj._name = name; return obj; };
+  G.go = function (name, params) {
+    if (!scenes[name]) { console.warn('scena assente:', name); return; }
+    if (fade.dir === 1) return;                 // a transition is already under way
+    fade.dir = 1; fade.next = name; fade.params = params || null;
+    G.hush();
+  };
+  G.home = function () { G.go('giungla'); };
+  G.sceneOf = function (n) { return scenes[n]; };
+
+  function swap() {
+    if (cur && cur.exit) { try { cur.exit(); } catch (e) { console.error(e); } }
+    writeSave();
+    cur = scenes[fade.next];
+    curName = fade.next; G.current = curName;
+    uiRects = []; uiHot = []; pressedKey = null;
+    if (cur && cur.enter) { try { cur.enter(fade.params); } catch (e) { console.error(e); } }
+  }
+
+  /* --------------------------------------------------------------- effects */
+  var parts = [], floats = [], rings = [], flyers = [];
+  var shakeAmt = 0;
+  G.shake = function (a) { shakeAmt = Math.min(10, Math.max(shakeAmt, a || 4)); };
+
+  var fx = (G.fx = {});
+  fx.burst = function (x, y, o) {
+    o = o || {};
+    var n = o.count || 14, i, a, sp;
+    for (i = 0; i < n; i++) {
+      a = o.angle === undefined ? G.rnd(0, Math.PI * 2) : o.angle + G.rnd(-.7, .7);
+      sp = (o.speed || 260) * G.rnd(.45, 1.2);
+      parts.push({
+        x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - (o.lift || 0),
+        life: o.life || G.rnd(.5, .95), age: 0, size: (o.size || 12) * G.rnd(.6, 1.25),
+        color: o.color || G.C.sun, grav: o.gravity === undefined ? 620 : o.gravity,
+        shape: o.shape || 'circle', spin: G.rnd(-8, 8), rot: G.rnd(0, 6.3)
+      });
+    }
+  };
+  fx.confetti = function () {
+    var cols = [G.C.berry, G.C.sun, G.C.mint, G.C.pinkPop, G.C.blueberry, G.C.tangerine], i;
+    for (i = 0; i < 90; i++) {
+      parts.push({
+        x: G.rnd(0, W), y: G.rnd(-160, -10), vx: G.rnd(-70, 70), vy: G.rnd(120, 330),
+        life: G.rnd(1.6, 2.8), age: 0, size: G.rnd(9, 18), color: cols[i % cols.length],
+        grav: 90, shape: 'rect', spin: G.rnd(-9, 9), rot: G.rnd(0, 6.3)
+      });
+    }
+  };
+  fx.text = function (x, y, str, color, size) {
+    floats.push({ x: x, y: y, str: String(str), color: color || G.C.cream, size: size || 42, age: 0, life: 1.1 });
+  };
+  fx.ring = function (x, y, color, max) {
+    rings.push({ x: x, y: y, color: color || '#fff', age: 0, life: .55, max: max || 130 });
+  };
+
+  var HUD_FRUIT = { x: 48, y: 46 }, HUD_STAR = { x: 212, y: 46 };
+  function flyTo(n, x, y, target, kind) {
+    var i, count = G.clamp(n, 1, 10);
+    var per = Math.floor(n / count), rest = n - per * count;
+    for (i = 0; i < count; i++) {
+      flyers.push({
+        x: x === undefined ? W / 2 : x + G.rnd(-24, 24),
+        y: y === undefined ? H / 2 : y + G.rnd(-24, 24),
+        tx: target.x, ty: target.y, age: 0, delay: i * .055,
+        life: .62, val: per + (i < rest ? 1 : 0), kind: kind
+      });
+    }
+  }
+  G.addFruits = function (n, x, y) {
+    n = Math.round(n); if (n <= 0) return;
+    flyTo(n, x, y, HUD_FRUIT, 'fruit'); G.sfx('coin');
+  };
+  G.addStars = function (n, x, y) {
+    n = Math.round(n); if (n <= 0) return;
+    flyTo(n, x, y, HUD_STAR, 'star'); G.sfx('chime');
+  };
+  G.spend = function (n) {
+    if (G.save.fruits < n) return false;
+    G.save.fruits -= n; G.saveNow(); G.sfx('pop'); return true;
+  };
+
+  function stepFx(dt) {
+    var i, p;
+    for (i = parts.length - 1; i >= 0; i--) {
+      p = parts[i]; p.age += dt;
+      if (p.age >= p.life) { parts.splice(i, 1); continue; }
+      p.vy += p.grav * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.spin * dt;
+    }
+    for (i = floats.length - 1; i >= 0; i--) {
+      p = floats[i]; p.age += dt; p.y -= 62 * dt;
+      if (p.age >= p.life) floats.splice(i, 1);
+    }
+    for (i = rings.length - 1; i >= 0; i--) {
+      p = rings[i]; p.age += dt; if (p.age >= p.life) rings.splice(i, 1);
+    }
+    for (i = flyers.length - 1; i >= 0; i--) {
+      p = flyers[i];
+      if (p.delay > 0) { p.delay -= dt; continue; }
+      p.age += dt;
+      if (p.age >= p.life) {
+        if (p.kind === 'star') G.save.stars += p.val; else G.save.fruits += p.val;
+        G.saveNow();
+        fx.ring(p.tx, p.ty, p.kind === 'star' ? G.C.sun : G.C.berry, 60);
+        flyers.splice(i, 1);
+      }
+    }
+    if (shakeAmt > 0) shakeAmt = Math.max(0, shakeAmt - dt * 22);
+  }
+
+  function drawParts(c) {
+    var i, p, k;
+    for (i = 0; i < parts.length; i++) {
+      p = parts[i];
+      k = 1 - p.age / p.life;
+      c.save();
+      c.globalAlpha = G.clamp(k * 1.6, 0, 1);
+      c.translate(p.x, p.y); c.rotate(p.rot);
+      c.fillStyle = p.color;
+      if (p.shape === 'rect') c.fillRect(-p.size / 2, -p.size / 3, p.size, p.size * .66);
+      else if (p.shape === 'star') { starPath(c, 0, 0, p.size); c.fill(); }
+      else { c.beginPath(); c.arc(0, 0, p.size / 2, 0, 7); c.fill(); }
+      c.restore();
+    }
+    for (i = 0; i < rings.length; i++) {
+      p = rings[i]; k = p.age / p.life;
+      c.save();
+      c.globalAlpha = (1 - k) * .8;
+      c.strokeStyle = p.color; c.lineWidth = 8 * (1 - k) + 2;
+      c.beginPath(); c.arc(p.x, p.y, G.ease(k) * p.max, 0, 7); c.stroke();
+      c.restore();
+    }
+    for (i = 0; i < floats.length; i++) {
+      p = floats[i]; k = p.age / p.life;
+      c.save();
+      c.globalAlpha = 1 - k * k;
+      G.text(p.str, p.x, p.y, { ctx: c, size: p.size, color: p.color, stroke: 'rgba(40,20,0,.5)' });
+      c.restore();
+    }
+  }
+  function drawFlyers(c) {
+    var i, p, k, x, y;
+    for (i = 0; i < flyers.length; i++) {
+      p = flyers[i];
+      if (p.delay > 0) continue;
+      k = G.ease(p.age / p.life);
+      x = G.lerp(p.x, p.tx, k);
+      y = G.lerp(p.y, p.ty, k) - Math.sin(k * Math.PI) * 90;
+      if (p.kind === 'star') starIcon(c, x, y, 22);
+      else if (window.A && A.fruit) A.fruit(c, x, y, 20, 'fragola');
+      else { c.fillStyle = G.C.berry; c.beginPath(); c.arc(x, y, 16, 0, 7); c.fill(); }
+    }
+  }
+
+  function starPath(c, x, y, r) {
+    var i, a, rr;
+    c.beginPath();
+    for (i = 0; i < 10; i++) {
+      a = -Math.PI / 2 + i * Math.PI / 5;
+      rr = i % 2 ? r * .46 : r;
+      c[i ? 'lineTo' : 'moveTo'](x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+    }
+    c.closePath();
+  }
+  G.starPath = starPath;
+  function starIcon(c, x, y, r) {
+    c.save();
+    c.fillStyle = G.C.sun; c.strokeStyle = '#c8901c'; c.lineWidth = Math.max(2, r * .12);
+    starPath(c, x, y, r); c.fill(); c.stroke();
+    c.restore();
+  }
+  G.starIcon = starIcon;
+
+  /* -------------------------------------------------------------------- HUD */
+  var gearHold = 0;
+  function drawHUD(c) {
+    if (!cur || cur.hud === false || !G.account) return;
+    var pill = function (x, w, drawIcon, value, col) {
+      c.save();
+      G.shadow(c, 12, 'rgba(0,0,0,.28)', 4);
+      c.fillStyle = 'rgba(255,246,224,.94)';
+      G.roundRect(c, x, 16, w, 60, 30); c.fill();
+      G.noShadow(c);
+      c.restore();
+      drawIcon(c, x + 32, 46, 24);
+      // maxWidth or the fruit counter runs out of its own pill at five digits
+      // and lands on the star pill, which starts at x = 180.
+      G.text(String(value), x + 62, 47, {
+        ctx: c, size: 34, color: col, align: 'left', maxWidth: w - 74
+      });
+    };
+    pill(16, 150, function (cc, x, y, r) {
+      if (window.A && A.fruit) A.fruit(cc, x, y, r, 'fragola');
+      else { cc.fillStyle = G.C.berry; cc.beginPath(); cc.arc(x, y, r, 0, 7); cc.fill(); }
+    }, Math.floor(G.save.fruits), G.C.ink);
+    pill(180, 132, function (cc, x, y, r) { starIcon(cc, x, y, r); }, Math.floor(G.save.stars), G.C.ink);
+
+    // right cluster
+    if (cur.back !== false && curName !== 'giungla') {
+      ui.round({
+        x: W - 60, y: 48, r: 40, color: G.C.tangerine, id: 'hud-home',
+        icon: function (cc, x, y, r) {
+          cc.save(); cc.strokeStyle = '#5b2c00'; cc.fillStyle = '#fff6e0';
+          cc.lineWidth = 5; cc.lineJoin = 'round';
+          cc.beginPath();
+          cc.moveTo(x - r * .42, y + r * .04); cc.lineTo(x, y - r * .40); cc.lineTo(x + r * .42, y + r * .04);
+          cc.lineTo(x + r * .30, y + r * .04); cc.lineTo(x + r * .30, y + r * .38);
+          cc.lineTo(x - r * .30, y + r * .38); cc.lineTo(x - r * .30, y + r * .04);
+          cc.closePath(); cc.fill(); cc.stroke(); cc.restore();
+        },
+        onTap: function () { G.home(); }
+      });
+    }
+    var mx = (cur.back !== false && curName !== 'giungla') ? W - 152 : W - 60;
+    ui.round({
+      x: mx, y: 48, r: 34, color: G.save.mute ? '#b9ada0' : G.C.cream, id: 'hud-mute',
+      icon: function (cc, x, y, r) {
+        cc.save(); cc.fillStyle = G.C.ink;
+        cc.beginPath();
+        cc.moveTo(x - r * .34, y - r * .14); cc.lineTo(x - r * .12, y - r * .14);
+        cc.lineTo(x + r * .10, y - r * .38); cc.lineTo(x + r * .10, y + r * .38);
+        cc.lineTo(x - r * .12, y + r * .14); cc.lineTo(x - r * .34, y + r * .14);
+        cc.closePath(); cc.fill();
+        cc.strokeStyle = G.C.ink; cc.lineWidth = r * .12; cc.lineCap = 'round';
+        if (G.save.mute) {
+          cc.beginPath(); cc.moveTo(x + r * .22, y - r * .20); cc.lineTo(x + r * .48, y + r * .20);
+          cc.moveTo(x + r * .48, y - r * .20); cc.lineTo(x + r * .22, y + r * .20); cc.stroke();
+        } else {
+          cc.beginPath(); cc.arc(x + r * .16, y, r * .26, -.9, .9); cc.stroke();
+          cc.beginPath(); cc.arc(x + r * .16, y, r * .46, -.9, .9); cc.stroke();
+        }
+        cc.restore();
+      },
+      onTap: function () {
+        G.save.mute = !G.save.mute; G.saveNow();
+        if (G.save.mute) G.hush(); else G.sfx('pop');
+      }
+    });
+    // parent gear — long press only, so kids cannot wander into settings
+    var gx = mx - 84, gy = 48, gr = 26;
+    c.save();
+    c.globalAlpha = .55 + gearHold * .45;
+    c.fillStyle = G.C.cream;
+    c.beginPath(); c.arc(gx, gy, gr + gearHold * 6, 0, 7); c.fill();
+    c.fillStyle = G.C.ink;
+    for (var i = 0; i < 8; i++) {
+      var a = i * Math.PI / 4 + G.t * .5;
+      c.save(); c.translate(gx + Math.cos(a) * gr * .62, gy + Math.sin(a) * gr * .62); c.rotate(a);
+      c.fillRect(-3, -5.5, 11, 11); c.restore();
+    }
+    c.beginPath(); c.arc(gx, gy, gr * .40, 0, 7); c.fill();
+    c.fillStyle = G.C.cream; c.beginPath(); c.arc(gx, gy, gr * .17, 0, 7); c.fill();
+    if (gearHold > 0) {
+      c.strokeStyle = G.C.berry; c.lineWidth = 5; c.lineCap = 'round';
+      c.beginPath(); c.arc(gx, gy, gr + 9, -Math.PI / 2, -Math.PI / 2 + gearHold * 6.283); c.stroke();
+    }
+    c.restore();
+    uiRects.push({ key: 'hud-gear', x: gx - gr - 8, y: gy - gr - 8, w: (gr + 8) * 2, h: (gr + 8) * 2, hold: true, round: true, cx: gx, cy: gy, cr: gr + 10 });
+  }
+
+  /* ---------------------------------------------------------------- overlay */
+  var ovl = document.getElementById('ovl');
+  var ovlT = document.getElementById('ovl-t'), ovlI = document.getElementById('ovl-i');
+  var ovlCb = null;
+  function closeOvl(val) {
+    ovl.classList.remove('on');
+    ovlI.blur();
+    var cb = ovlCb; ovlCb = null;
+    if (cb) cb(val);
+  }
+  document.getElementById('ovl-y').addEventListener('click', function () { closeOvl(ovlI.value.trim()); });
+  document.getElementById('ovl-n').addEventListener('click', function () { closeOvl(null); });
+  ovlI.addEventListener('keydown', function (e) { if (e.key === 'Enter') closeOvl(ovlI.value.trim()); });
+  G.prompt = function (title, initial, cb) {
+    ovlT.textContent = title;
+    ovlI.value = initial || '';
+    ovlCb = cb;
+    ovl.classList.add('on');
+    setTimeout(function () { ovlI.focus(); ovlI.select(); }, 60);
+  };
+  G.overlayOpen = function () { return ovl.classList.contains('on'); };
+
+  /* ------------------------------------------------------------ event wiring */
+  function onDown(e) {
+    if (G.overlayOpen()) return;
+    G.resumeAudio();
+    var p = toLogical(e.clientX, e.clientY);
+    p.id = e.pointerId;
+    pointer.x = p.x; pointer.y = p.y; pointer.down = true; pointer.id = e.pointerId;
+    if (fade.dir !== 0) return;
+    var hit = hitTest(p);
+    if (hit) {
+      if (hit.hold) { gearHold = 0.001; pressedKey = null; return; }
+      pressedKey = hit.key;
+      return;
+    }
+    pressedKey = null;
+    if (cur && cur.onDown) cur.onDown(p);
+  }
+  function onMove(e) {
+    if (G.overlayOpen()) return;
+    var p = toLogical(e.clientX, e.clientY);
+    p.id = e.pointerId;
+    pointer.x = p.x; pointer.y = p.y;
+    if (!pointer.down) return;
+    if (gearHold > 0) {
+      var g = hitTest(p);
+      if (!g || !g.hold) gearHold = 0;
+      return;
+    }
+    if (pressedKey) {
+      var h = hitTest(p);
+      if (!h || h.key !== pressedKey) pressedKey = null;
+      return;
+    }
+    if (cur && cur.onMove) cur.onMove(p);
+  }
+  function onUp(e) {
+    if (G.overlayOpen()) return;
+    var p = toLogical(e.clientX, e.clientY);
+    p.id = e.pointerId;
+    pointer.x = p.x; pointer.y = p.y; pointer.down = false;
+    gearHold = 0;
+    if (pressedKey) {
+      var hit = hitTest(p);
+      if (hit && hit.key === pressedKey && hit.onTap) {
+        if (!hit.silent) G.sfx('tap');
+        var f = hit.onTap; pressedKey = null;
+        f();
+        return;
+      }
+      pressedKey = null;
+      return;
+    }
+    if (cur && cur.onUp) cur.onUp(p);
+  }
+  cv.addEventListener('pointerdown', function (e) { e.preventDefault(); cv.setPointerCapture && cv.setPointerCapture(e.pointerId); onDown(e); });
+  cv.addEventListener('pointermove', function (e) { e.preventDefault(); onMove(e); });
+  cv.addEventListener('pointerup', function (e) { e.preventDefault(); onUp(e); });
+  cv.addEventListener('pointercancel', function (e) { pointer.down = false; pressedKey = null; gearHold = 0; if (cur && cur.onUp) cur.onUp({ x: pointer.x, y: pointer.y, id: e.pointerId }); });
+  cv.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  window.addEventListener('blur', function () { pointer.down = false; pressedKey = null; gearHold = 0; });
+
+  /* ------------------------------------------------------------------- loop */
+  var last = 0, running = true;
+  document.addEventListener('visibilitychange', function () {
+    running = !document.hidden;
+    if (!running) { writeSave(); G.hush(); }
+    else { last = 0; G.resumeAudio(); }
+  });
+  window.addEventListener('pagehide', writeSave);
+  window.addEventListener('beforeunload', writeSave);
+
+  function frame(ts) {
+    requestAnimationFrame(frame);
+    if (!running) return;
+    if (!last) last = ts;
+    var dt = Math.min((ts - last) / 1000, .05);
+    last = ts;
+    G.dt = dt; G.t += dt; G.frame++;
+
+    if (G.account) G.save.playSec += dt;
+
+    // gear long-press
+    if (gearHold > 0 && pointer.down) {
+      gearHold = Math.min(1, gearHold + dt / 1.4);
+      if (gearHold >= 1) {
+        gearHold = 0; pointer.down = false; G.sfx('chime');
+        G.go('gate', { then: 'genitori', back: curName });
+      }
+    }
+
+    // autosave
+    if (saveDirty) { saveTimer += dt; if (saveTimer > .8) { saveTimer = 0; writeSave(); } }
+
+    // fade / scene swap
+    if (fade.dir === 1) {
+      fade.a += dt / .20;
+      if (fade.a >= 1) {
+        fade.a = 1;
+        // Clear the flag *before* swapping so a scene's enter() is allowed to
+        // redirect straight to another scene; if it did, honour that instead.
+        fade.dir = 0;
+        swap();
+        if (fade.dir !== 1) fade.dir = -1;
+      }
+    } else if (fade.dir === -1) {
+      fade.a -= dt / .22;
+      if (fade.a <= 0) { fade.a = 0; fade.dir = 0; }
+    }
+
+    if (cur && cur.update && fade.dir !== 1) { try { cur.update(dt); } catch (e) { console.error(e); } }
+    stepFx(dt);
+
+    // ---- render
+    uiHot = uiRects; uiRects = [];
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    ctx.fillStyle = '#0b2418';
+    ctx.fillRect(0, 0, cv.width / view.dpr, cv.height / view.dpr);
+    ctx.setTransform(view.dpr * view.s, 0, 0, view.dpr * view.s, view.dpr * view.ox, view.dpr * view.oy);
+    ctx.save();
+    // Clip first, shake second: otherwise the shake drags the letterbox in.
+    ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+    if (shakeAmt > 0) ctx.translate(G.rnd(-shakeAmt, shakeAmt), G.rnd(-shakeAmt, shakeAmt));
+
+    if (cur && cur.draw) { try { cur.draw(ctx); } catch (e) { console.error(e); } }
+    drawParts(ctx);
+    drawHUD(ctx);
+    drawFlyers(ctx);
+
+    ctx.restore();
+    if (fade.a > 0) {
+      ctx.fillStyle = 'rgba(9,32,21,' + fade.a.toFixed(3) + ')';
+      ctx.fillRect(-200, -200, W + 400, H + 400);
+    }
+  }
+  requestAnimationFrame(frame);
+
+  /* --------------------------------------------------------------- boot API */
+  G.start = function (name, params) {
+    cur = scenes[name]; curName = name; G.current = name;
+    if (cur && cur.enter) cur.enter(params || null);
+    fade.a = 1; fade.dir = -1;
+  };
+})();
+
+
+/* ==================== 01-art-stazione.js ==================== */
+/* Disegni procedurali di Dino Stazione: treni, simboli, segnali e fondali. */
+var A = window.A = window.A || {};
+(function () {
+  'use strict';
+
+  var C = G.C;
+
+  A.destination = function (c, x, y, r, kind) {
+    c.save(); c.translate(x, y); c.lineJoin = 'round'; c.lineCap = 'round';
+    c.strokeStyle = C.ink; c.lineWidth = Math.max(3, r * .11);
+    if (kind === 0) {
+      c.fillStyle = C.sun; c.beginPath(); c.arc(0, 0, r * .48, 0, 7); c.fill(); c.stroke();
+      for (var i = 0; i < 8; i++) {
+        var a = i * Math.PI / 4;
+        c.beginPath(); c.moveTo(Math.cos(a) * r * .66, Math.sin(a) * r * .66);
+        c.lineTo(Math.cos(a) * r, Math.sin(a) * r); c.stroke();
+      }
+    } else if (kind === 1) {
+      c.fillStyle = C.water; c.beginPath();
+      c.moveTo(-r, r * .18); c.quadraticCurveTo(-r * .55, -r * .35, -r * .1, r * .18);
+      c.quadraticCurveTo(r * .35, r * .68, r, r * .05); c.lineTo(r, r * .75); c.lineTo(-r, r * .75); c.closePath();
+      c.fill(); c.stroke();
+    } else {
+      c.fillStyle = C.leaf; c.beginPath();
+      c.moveTo(0, -r); c.lineTo(r * .85, r * .18); c.lineTo(r * .42, r * .18);
+      c.lineTo(r * .9, r * .82); c.lineTo(-r * .9, r * .82); c.lineTo(-r * .42, r * .18);
+      c.lineTo(-r * .85, r * .18); c.closePath(); c.fill(); c.stroke();
+    }
+    c.restore();
+  };
+
+  A.train = function (c, x, y, s, o) {
+    o = o || {}; var flip = o.dir === -1 ? -1 : 1;
+    c.save(); c.translate(x, y); c.scale(flip, 1); c.lineJoin = 'round';
+    var body = o.color || C.berry;
+    c.fillStyle = 'rgba(30,20,10,.18)'; c.beginPath(); c.ellipse(0, s * .30, s * .88, s * .13, 0, 0, 7); c.fill();
+    c.strokeStyle = C.ink; c.lineWidth = Math.max(3, s * .055);
+    c.fillStyle = body; G.roundRect(c, -s * .63, -s * .22, s * 1.15, s * .46, s * .12); c.fill(); c.stroke();
+    c.fillStyle = G.shade(body, -24); G.roundRect(c, -s * .34, -s * .58, s * .56, s * .39, s * .08); c.fill(); c.stroke();
+    c.fillStyle = '#dff5ff'; G.roundRect(c, -s * .23, -s * .50, s * .31, s * .20, s * .04); c.fill(); c.stroke();
+    c.fillStyle = C.bark; G.roundRect(c, s * .25, -s * .53, s * .15, s * .32, s * .04); c.fill(); c.stroke();
+    c.fillStyle = C.cream; c.beginPath(); c.arc(s * .48, -s * .03, s * .12, 0, 7); c.fill(); c.stroke();
+    [-.38, .22].forEach(function (wx) {
+      c.fillStyle = '#384557'; c.beginPath(); c.arc(s * wx, s * .25, s * .18, 0, 7); c.fill(); c.stroke();
+      c.fillStyle = '#a9b2bd'; c.beginPath(); c.arc(s * wx, s * .25, s * .07, 0, 7); c.fill();
+    });
+    if (o.kind !== undefined) {
+      c.fillStyle = C.cream; c.beginPath(); c.arc(-s * .52, 0, s * .20, 0, 7); c.fill(); c.stroke();
+      A.destination(c, -s * .52, 0, s * .13, o.kind);
+    }
+    c.restore();
+  };
+
+  /* I profili ereditati chiamano questo nome interno: qui mostrano una locomotiva. */
+  A.kartBack = function (c, x, y, s, o) { A.train(c, x, y, s * .62, { color: o && o.color, dir: 1 }); };
+
+  A.signal = function (c, x, y, r, green) {
+    c.save(); c.strokeStyle = C.ink; c.lineWidth = Math.max(3, r * .09); c.lineCap = 'round';
+    c.beginPath(); c.moveTo(x, y + r * .55); c.lineTo(x, y + r * 1.45); c.stroke();
+    c.fillStyle = '#384557'; G.roundRect(c, x - r * .55, y - r * .65, r * 1.1, r * 1.25, r * .25); c.fill(); c.stroke();
+    c.fillStyle = green ? C.mint : '#c34848'; c.beginPath(); c.arc(x, y, r * .30, 0, 7); c.fill(); c.stroke();
+    c.restore();
+  };
+
+  A.stationSky = function (c) {
+    var g = c.createLinearGradient(0, 0, 0, 720); g.addColorStop(0, '#82cce5'); g.addColorStop(1, '#d9f0cf');
+    c.fillStyle = g; c.fillRect(0, 0, 1280, 720);
+    c.fillStyle = '#f2d9a8'; c.fillRect(0, 175, 1280, 545);
+    c.fillStyle = '#d66f4b'; G.roundRect(c, 350, 52, 580, 145, 24); c.fill();
+    c.fillStyle = C.cream; G.roundRect(c, 385, 88, 510, 109, 14); c.fill();
+    G.text('DINO STAZIONE', 640, 130, { ctx: c, size: 45, color: C.ink });
+    c.fillStyle = '#a34e38'; c.beginPath(); c.moveTo(320, 63); c.lineTo(640, 0); c.lineTo(960, 63); c.closePath(); c.fill();
+  };
+})();
+
+
+/* ==================== 03-profili.js ==================== */
+/* Chi dirige la stazione: profili, segreto a figure, colore della locomotiva.
+
+   Portato da Dino Giungla e non reinventato, perché i due giochi stanno sullo
+   stesso tablet e nelle stesse mani: se il modo di dire "sono io" cambia fra un
+   gioco e l'altro, il bambino deve impararlo due volte.
+
+   Tre differenze, tutte dovute al fatto che questo è un gioco di corse:
+     - l'anteprima è il KART, non il dino di profilo. Qui il dino esiste solo di
+       spalle, e mostrarlo di lato sarebbe promettere un disegno che non c'è.
+     - la domanda sull'età non apre giochi diversi, sceglie la DIFFICOLTÀ di
+       partenza: Piccolo parte da Facile, Grande da Gara. Poi si cambia dal
+       menu quando si vuole.
+     - niente `A.jungle` da cui pescare uno sfondo, quindi lo sfondo è lo stesso
+       cielo notturno e la stessa striscia d'asfalto del menu.
+
+   Il segreto è tre figure, non una password: un bambino di tre anni non sa
+   scrivere ma ricorda benissimo "cuore, stella, luna". Non è sicurezza, è una
+   serratura di famiglia — tiene due fratelli fuori dai progressi l'uno
+   dell'altro, e nient'altro. */
+(function () {
+  'use strict';
+
+  var C = G.C, W = G.W, H = G.H;
+  var TAU = 6.2831853;
+
+  var COLORS = [C.dino, C.blueberry, C.pinkPop, C.tangerine, C.plum, C.water];
+
+  /* Le nove figure del segreto. Disegnate qui perché Dino Kart non porta con sé
+     la libreria di forme di Dino Giungla, e nove forme sono più economiche di
+     una dipendenza. Forma E colore insieme: un bambino che non distingue ancora
+     un rombo da un quadrato distingue benissimo l'azzurro dal blu. */
+  var KEYS = [
+    { k: 'cerchio', col: C.berry },
+    { k: 'quadrato', col: C.blueberry },
+    { k: 'triangolo', col: C.mint },
+    { k: 'cuore', col: C.pinkPop },
+    { k: 'stella', col: C.sun },
+    { k: 'fiore', col: C.plum },
+    { k: 'luna', col: C.tangerine },
+    { k: 'rombo', col: C.water },
+    { k: 'quadrato', col: C.leafLight }
+  ];
+
+  function icon(c, x, y, r, i) {
+    var s = KEYS[i % KEYS.length];
+    var j;
+    c.save();
+    c.translate(x, y);
+    c.beginPath();
+    if (s.k === 'cerchio') {
+      c.arc(0, 0, r, 0, TAU);
+    } else if (s.k === 'quadrato') {
+      G.roundRect(c, -r * 0.86, -r * 0.86, r * 1.72, r * 1.72, r * 0.24);
+    } else if (s.k === 'triangolo') {
+      c.moveTo(0, -r); c.lineTo(r * 0.92, r * 0.72); c.lineTo(-r * 0.92, r * 0.72); c.closePath();
+    } else if (s.k === 'rombo') {
+      c.moveTo(0, -r); c.lineTo(r, 0); c.lineTo(0, r); c.lineTo(-r, 0); c.closePath();
+    } else if (s.k === 'cuore') {
+      c.moveTo(0, r * 0.9);
+      c.bezierCurveTo(-r * 1.5, -r * 0.15, -r * 0.55, -r * 1.15, 0, -r * 0.34);
+      c.bezierCurveTo(r * 0.55, -r * 1.15, r * 1.5, -r * 0.15, 0, r * 0.9);
+      c.closePath();
+    } else if (s.k === 'stella') {
+      for (j = 0; j < 10; j++) {
+        var a = -Math.PI / 2 + j * Math.PI / 5;
+        var rr = j % 2 ? r * 0.46 : r;
+        if (j === 0) c.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+        else c.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+      }
+      c.closePath();
+    } else if (s.k === 'luna') {
+      c.arc(0, 0, r, Math.PI * 0.42, Math.PI * 1.58);
+      c.arc(-r * 0.42, 0, r * 0.92, Math.PI * 1.52, Math.PI * 0.48, true);
+      c.closePath();
+    } else {                                   // fiore
+      for (j = 0; j < 5; j++) {
+        var b = -Math.PI / 2 + j * TAU / 5;
+        c.moveTo(0, 0);
+        c.arc(Math.cos(b) * r * 0.52, Math.sin(b) * r * 0.52, r * 0.48, 0, TAU);
+      }
+    }
+    c.fillStyle = s.col; c.fill();
+    c.strokeStyle = 'rgba(20,14,8,.55)'; c.lineWidth = Math.max(2, r * 0.12); c.stroke();
+    c.restore();
+  }
+
+  /* Lo sfondo: lo stesso del menu, così passare dal profilo alla gara non
+     sembra passare da un gioco a un altro. */
+  function backdrop(c, title) {
+    var sky = c.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, '#82cce5');
+    sky.addColorStop(0.60, '#cde9d5');
+    sky.addColorStop(1, '#f2d9a8');
+    c.fillStyle = sky; c.fillRect(0, 0, W, H);
+    c.fillStyle = '#d4bf95'; c.fillRect(0, H - 118, W, 118);
+    c.strokeStyle = '#62594e'; c.lineWidth = 8;
+    c.beginPath(); c.moveTo(0, H - 74); c.lineTo(W, H - 74); c.moveTo(0, H - 44); c.lineTo(W, H - 44); c.stroke();
+    c.strokeStyle = '#8b765b'; c.lineWidth = 5;
+    for (var i = 0; i < 26; i++) { c.beginPath(); c.moveTo(i * 52, H - 88); c.lineTo(i * 52, H - 30); c.stroke(); }
+    if (title) {
+      G.text(title, W / 2, 66, {
+        ctx: c, size: 54, color: C.sun, stroke: 'rgba(12,20,40,.85)', strokeWidth: 12
+      });
+    }
+  }
+
+  function kartPreview(c, x, y, s, color, wob) {
+    if (A.kartBack) {
+      A.kartBack(c, x, y, s, { color: color, lean: Math.sin(G.t * 1.5 + (wob || 0)) * 0.3, bob: Math.sin(G.t * 3) * 0.5 });
+      return;
+    }
+    c.fillStyle = color; c.fillRect(x - s / 2, y - s * 0.4, s, s * 0.4);
+  }
+
+  /* ------------------------------------------------------- scena: accesso */
+  G.scene('accesso', {
+    hud: false, back: false,
+
+    enter: function () {
+      var n = G.accounts.list().length;
+      setTimeout(function () {
+        if (G.current !== 'accesso') return;
+        G.say(n ? 'Chi dirige la stazione oggi?' : 'Benvenuto! Facciamo il tuo capo stazione.');
+      }, 460);
+    },
+
+    draw: function (c) {
+      backdrop(c, 'Chi dirige la stazione?');
+
+      var items = G.accounts.list().slice(0, 5);
+      var n = items.length + 1;
+      var cw = 210, gap = 22;
+      var x0 = (W - (n * cw + (n - 1) * gap)) / 2, y = 150, ch = 340;
+
+      items.forEach(function (a, i) {
+        var x = x0 + i * (cw + gap);
+        var wob = Math.sin(G.t * 1.6 + i) * 4;
+        c.save();
+        c.fillStyle = 'rgba(14,20,34,.55)';
+        G.roundRect(c, x, y + wob, cw, ch, 26); c.fill();
+        c.strokeStyle = 'rgba(255,246,224,.22)'; c.lineWidth = 2;
+        G.roundRect(c, x, y + wob, cw, ch, 26); c.stroke();
+        c.restore();
+
+        kartPreview(c, x + cw / 2, y + wob + 210, 148, a.color, i);
+        G.text(a.name, x + cw / 2, y + wob + 258, {
+          ctx: c, size: 32, color: C.cream, maxWidth: cw - 24
+        });
+
+        c.save();
+        c.fillStyle = a.level === 2 ? C.berry : C.mint;
+        G.roundRect(c, x + cw / 2 - 58, y + wob + 282, 116, 32, 16); c.fill();
+        c.restore();
+        G.text(a.level === 2 ? 'Grande' : 'Piccolo', x + cw / 2, y + wob + 299, {
+          ctx: c, size: 21, color: '#fff'
+        });
+
+        // il lucchetto: un puntino, non una spiegazione
+        if (a.secret) {
+          c.save(); c.globalAlpha = 0.9;
+          icon(c, x + cw - 28, y + wob + 28, 13, 4);
+          c.restore();
+        }
+
+        G.ui.button({
+          id: 'acct' + a.id, x: x, y: y + wob, w: cw, h: ch, r: 26, ghost: true,
+          onTap: function () {
+            if (a.secret) G.go('segreto', { id: a.id });
+            else { G.accounts.login(a.id); G.go('menu'); }
+          }
+        });
+      });
+
+      var xn = x0 + items.length * (cw + gap);
+      var wn = Math.sin(G.t * 1.6 + items.length) * 4;
+      G.ui.button({
+        id: 'nuovo', x: xn, y: y + wn, w: cw, h: ch, r: 26, color: C.leaf,
+        icon: function (cc, cx, cy) {
+          cc.save();
+          cc.strokeStyle = '#fff'; cc.lineWidth = 15; cc.lineCap = 'round';
+          cc.beginPath();
+          cc.moveTo(cx, cy - 92); cc.lineTo(cx, cy - 20);
+          cc.moveTo(cx - 36, cy - 56); cc.lineTo(cx + 36, cy - 56);
+          cc.stroke(); cc.restore();
+        },
+        onTap: function () { G.go('nuovo'); }
+      });
+      G.text('Nuovo', xn + cw / 2, y + wn + ch - 88, { ctx: c, size: 32, color: '#fff' });
+      G.text('capo stazione', xn + cw / 2, y + wn + ch - 52, { ctx: c, size: 24, color: '#fff' });
+
+      if (items.length) {
+        G.ui.round({
+          id: 'gestisci', x: W - 54, y: H - 50, r: 28, color: 'rgba(255,246,224,.5)',
+          icon: function (cc, x, yy, r) {
+            cc.save(); cc.fillStyle = C.ink;
+            for (var i = 0; i < 8; i++) {
+              var a = i * Math.PI / 4 + G.t * 0.4;
+              cc.save();
+              cc.translate(x + Math.cos(a) * r * 0.5, yy + Math.sin(a) * r * 0.5);
+              cc.rotate(a); cc.fillRect(-3, -5, 10, 10); cc.restore();
+            }
+            cc.beginPath(); cc.arc(x, yy, r * 0.32, 0, TAU); cc.fill();
+            cc.fillStyle = 'rgba(255,246,224,.9)';
+            cc.beginPath(); cc.arc(x, yy, r * 0.13, 0, TAU); cc.fill();
+            cc.restore();
+          },
+          onTap: function () { G.go('gate'); }
+        });
+      }
+    }
+  });
+
+  /* ------------------------------------------------------- scena: segreto */
+  var sg = { id: null, taps: [], shake: 0, fails: 0 };
+
+  G.scene('segreto', {
+    hud: false, back: false,
+    enter: function (p) {
+      sg.id = p && p.id; sg.taps = []; sg.shake = 0; sg.fails = 0;
+      var a = G.accounts.byId(sg.id);
+      setTimeout(function () {
+        if (G.current !== 'segreto') return;
+        G.say('Ciao ' + (a ? a.name : '') + '! Tocca il tuo segreto.');
+      }, 400);
+    },
+    update: function (dt) { if (sg.shake > 0) sg.shake = Math.max(0, sg.shake - dt * 4); },
+    draw: function (c) {
+      var a = G.accounts.byId(sg.id);
+      if (!a) { G.go('accesso'); return; }
+      backdrop(c, null);
+
+      kartPreview(c, 250, 520, 200, a.color, 0);
+      G.text('Ciao ' + a.name + '!', 250, 178, {
+        ctx: c, size: 48, color: C.sun, stroke: 'rgba(12,20,40,.8)', strokeWidth: 11
+      });
+      G.text('Tocca il tuo segreto', 250, 232, {
+        ctx: c, size: 27, color: C.cream, weight: 700
+      });
+
+      var i;
+      for (i = 0; i < 3; i++) {
+        var sx = 250 + (i - 1) * 74, sy = 290;
+        c.save();
+        c.fillStyle = 'rgba(255,246,224,.24)';
+        c.beginPath(); c.arc(sx, sy, 27, 0, TAU); c.fill();
+        c.restore();
+        if (sg.taps[i] !== undefined) icon(c, sx, sy, 21, sg.taps[i]);
+      }
+
+      var px = 690, py = 132, cell = 148, gap = 14;
+      var jitter = sg.shake > 0 ? Math.sin(G.t * 50) * sg.shake * 10 : 0;
+      for (i = 0; i < 9; i++) {
+        (function (idx) {
+          var bx = px + (idx % 3) * (cell + gap) + jitter;
+          var by = py + Math.floor(idx / 3) * (cell + gap);
+          G.ui.button({
+            id: 'sk' + idx, x: bx, y: by, w: cell, h: cell, r: 24, color: C.cream,
+            icon: function (cc, cx, cy) { icon(cc, cx, cy, cell * 0.29, idx); },
+            onTap: function () {
+              sg.taps.push(idx);
+              G.sfx('pop');
+              if (sg.taps.length < 3) return;
+              var ok = a.secret && a.secret.length === 3 &&
+                a.secret.every(function (v, k) { return v === sg.taps[k]; });
+              if (ok) {
+                G.sfx('good');
+                G.accounts.login(a.id);
+                G.go('menu');
+              } else {
+                sg.fails++; sg.shake = 1; sg.taps = [];
+                G.sfx('bad'); G.shake(6);
+                G.say(G.pick(['Ops! Riprova.', 'Non e questo, riprova!', 'Ancora una volta.']));
+              }
+            }
+          });
+        })(i);
+      }
+
+      G.ui.button({
+        x: 40, y: H - 104, w: 240, h: 82, r: 24, color: C.bark, label: 'Indietro',
+        onTap: function () { G.go('accesso'); }
+      });
+      /* Dopo tre tentativi appare la via d'uscita, dietro al cancello dei
+         grandi: un bambino che ha dimenticato il segreto non deve restare
+         chiuso fuori dal proprio gioco. */
+      if (sg.fails >= 3) {
+        G.ui.button({
+          x: 300, y: H - 104, w: 320, h: 82, r: 24, color: C.tangerine,
+          label: 'Chiedi a un grande', fontSize: 26,
+          onTap: function () { G.go('gate', { then: '@login', arg: a.id, back: 'segreto', backArg: { id: a.id } }); }
+        });
+      }
+    }
+  });
+
+  /* --------------------------------------------------------- scena: nuovo */
+  var nu = { step: 0, name: '', color: COLORS[0], level: 1, secret: [] };
+
+  G.scene('nuovo', {
+    hud: false, back: false,
+    enter: function () {
+      nu = { step: 0, name: '', color: COLORS[0], level: 1, secret: [] };
+      G.prompt('Come ti chiami?', '', function (v) {
+        if (!v) { G.go('accesso'); return; }
+        nu.name = v.slice(0, 14);
+        nu.step = 1;
+        G.say('Ciao ' + nu.name + '! Di che colore è la tua locomotiva?');
+      });
+    },
+    draw: function (c) {
+      var titles = ['', 'Di che colore è la locomotiva?', 'Quanti anni hai?', 'Scegli il tuo segreto'];
+      backdrop(c, titles[nu.step] || '');
+      var i;
+
+      if (nu.step === 1) {
+        kartPreview(c, W / 2, 470, 250, nu.color, 0);
+        G.text(nu.name, W / 2, 520, { ctx: c, size: 38, color: C.cream });
+        var bw = 128, bg = 18;
+        var x0 = (W - (COLORS.length * bw + (COLORS.length - 1) * bg)) / 2;
+        COLORS.forEach(function (col, k) {
+          G.ui.button({
+            id: 'col' + k, x: x0 + k * (bw + bg), y: 140, w: bw, h: 116, r: 24, color: col,
+            icon: function (cc, cx, cy) {
+              if (nu.color !== col) return;
+              cc.save();
+              cc.strokeStyle = '#fff'; cc.lineWidth = 8; cc.lineCap = 'round'; cc.lineJoin = 'round';
+              cc.beginPath();
+              cc.moveTo(cx - 22, cy); cc.lineTo(cx - 6, cy + 18); cc.lineTo(cx + 24, cy - 18);
+              cc.stroke(); cc.restore();
+            },
+            onTap: function () { nu.color = col; G.sfx('pop'); }
+          });
+        });
+        G.ui.button({
+          x: W / 2 - 180, y: H - 112, w: 360, h: 88, r: 26, color: C.leaf, label: 'Avanti',
+          onTap: function () { nu.step = 2; G.say('Quanti anni hai?'); }
+        });
+      }
+
+      if (nu.step === 2) {
+        /* L'eta non apre giochi diversi: sceglie da quale difficolta si parte.
+           Piu onesto che inventare due modalita che poi non esistono. */
+        [{ lv: 1, t: 'Piccolo', s: '3 - 4 anni', col: C.mint, d: 'Un treno alla volta, con tanti aiuti' },
+         { lv: 2, t: 'Grande', s: '5 - 7 anni', col: C.berry, d: 'Più binari e coincidenze da organizzare' }]
+          .forEach(function (o, k) {
+            var x = W / 2 - 340 + k * 360;
+            G.ui.button({
+              id: 'lv' + o.lv, x: x, y: 160, w: 320, h: 280, r: 30,
+              color: nu.level === o.lv ? o.col : G.shade(o.col, -60),
+              label: o.t, sub: o.s, fontSize: 50,
+              onTap: function () { nu.level = o.lv; G.sfx('pop'); }
+            });
+            G.text(o.d, x + 160, 476, { ctx: c, size: 22, color: C.cream, weight: 700 });
+          });
+        G.ui.button({
+          x: W / 2 - 180, y: H - 112, w: 360, h: 88, r: 26, color: C.leaf, label: 'Avanti',
+          onTap: function () { nu.step = 3; G.say('Scegli tre figure: sara il tuo segreto.'); }
+        });
+      }
+
+      if (nu.step === 3) {
+        G.text('Tocca 3 figure e ricordale bene', W / 2, 118, {
+          ctx: c, size: 26, color: C.cream, weight: 700
+        });
+        for (i = 0; i < 3; i++) {
+          var sx = W / 2 + (i - 1) * 88, sy = 176;
+          c.save(); c.fillStyle = 'rgba(255,246,224,.24)';
+          c.beginPath(); c.arc(sx, sy, 31, 0, TAU); c.fill(); c.restore();
+          if (nu.secret[i] !== undefined) icon(c, sx, sy, 24, nu.secret[i]);
+        }
+        var px = W / 2 - 232, py = 228, cell = 138, gap = 16;
+        for (i = 0; i < 9; i++) {
+          (function (idx) {
+            var bx = px + (idx % 3) * (cell + gap), by = py + Math.floor(idx / 3) * (cell + gap);
+            G.ui.button({
+              id: 'nk' + idx, x: bx, y: by, w: cell, h: cell, r: 24, color: C.cream,
+              disabled: nu.secret.length >= 3,
+              icon: function (cc, cx, cy) { icon(cc, cx, cy, cell * 0.28, idx); },
+              onTap: function () { nu.secret.push(idx); G.sfx('pop'); }
+            });
+          })(i);
+        }
+        G.ui.button({
+          x: 34, y: H - 112, w: 240, h: 88, r: 26, color: C.bark, label: 'Rifai', fontSize: 32,
+          onTap: function () { nu.secret = []; }
+        });
+        G.ui.button({
+          x: W - 274, y: H - 112, w: 240, h: 88, r: 26, color: '#5a6472',
+          label: 'Senza segreto', fontSize: 22,
+          onTap: function () { nu.secret = []; finish(); }
+        });
+        if (nu.secret.length === 3) {
+          G.ui.button({
+            x: W / 2 - 160, y: H - 112, w: 320, h: 88, r: 26, color: C.leaf, label: 'Fatto!',
+            onTap: finish
+          });
+        }
+      }
+    }
+  });
+
+  function finish() {
+    var a = G.accounts.create({
+      name: nu.name, color: nu.color, level: nu.level,
+      secret: nu.secret.length === 3 ? nu.secret : null
+    });
+    G.accounts.login(a.id);
+    /* L'eta scelta diventa la difficolta di partenza, una volta sola: da qui in
+       poi comanda il menu, perche un bambino cresce piu in fretta di quanto si
+       rifaccia un profilo. */
+    G.fx.confetti(); G.sfx('win');
+    G.go('menu');
+    setTimeout(function () { G.say('Tutti in carrozza, ' + a.name + '!'); }, 900);
+  }
+
+  /* ---------------------------------------------------------- scena: gate */
+  /* Il cancello dei grandi: una moltiplicazione a due cifre. Non e sicurezza,
+     e un attrito che un bambino di sei anni non supera per sbaglio. */
+  var gt = { a: 0, b: 0, typed: '', then: 'gestione', arg: null, back: 'accesso', backArg: null, shake: 0 };
+
+  G.scene('gate', {
+    hud: false, back: false,
+    enter: function (p) {
+      p = p || {};
+      gt.a = G.rndi(6, 9); gt.b = G.rndi(6, 9);
+      gt.typed = ''; gt.shake = 0;
+      gt.then = p.then || 'gestione'; gt.arg = p.arg || null;
+      gt.back = p.back || 'accesso'; gt.backArg = p.backArg || null;
+    },
+    update: function (dt) { if (gt.shake > 0) gt.shake = Math.max(0, gt.shake - dt * 4); },
+    draw: function (c) {
+      backdrop(c, null);
+      G.text('Solo per i grandi', W / 2, 74, {
+        ctx: c, size: 46, color: C.cream, stroke: 'rgba(12,20,40,.8)', strokeWidth: 10
+      });
+
+      var j = gt.shake > 0 ? Math.sin(G.t * 48) * gt.shake * 12 : 0;
+      c.save();
+      c.fillStyle = 'rgba(14,20,34,.6)';
+      G.roundRect(c, 150 + j, 160, 440, 290, 26); c.fill();
+      c.restore();
+      G.text(gt.a + ' x ' + gt.b + ' = ?', 370 + j, 246, { ctx: c, size: 66, color: C.sun });
+      c.save();
+      c.fillStyle = 'rgba(255,246,224,.9)';
+      G.roundRect(c, 210 + j, 312, 320, 92, 20); c.fill(); c.restore();
+      G.text(gt.typed || '-', 370 + j, 358, { ctx: c, size: 54, color: C.ink });
+
+      var keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', 'OK'];
+      var kx = 690, ky = 150, kw = 148, kh = 112, kg = 14;
+      keys.forEach(function (k, i) {
+        G.ui.button({
+          id: 'g' + k, x: kx + (i % 3) * (kw + kg), y: ky + Math.floor(i / 3) * (kh + kg),
+          w: kw, h: kh, r: 22,
+          color: k === 'OK' ? C.leaf : k === 'C' ? C.berry : C.cream,
+          textColor: (k === 'OK' || k === 'C') ? '#fff' : C.ink,
+          label: k, fontSize: 42,
+          onTap: function () {
+            if (k === 'C') { gt.typed = ''; return; }
+            if (k === 'OK') {
+              if (parseInt(gt.typed, 10) === gt.a * gt.b) {
+                G.sfx('good');
+                if (gt.then === '@login') { G.accounts.login(gt.arg); G.go('menu'); }
+                else G.go(gt.then, gt.arg);
+              } else { gt.shake = 1; gt.typed = ''; G.sfx('bad'); }
+              return;
+            }
+            if (gt.typed.length < 3) gt.typed += k;
+          }
+        });
+      });
+
+      G.ui.button({
+        x: 150, y: H - 100, w: 280, h: 80, r: 24, color: C.bark, label: 'Annulla',
+        onTap: function () { G.go(gt.back, gt.backArg); }
+      });
+    }
+  });
+
+  /* ------------------------------------------------------ scena: gestione */
+  var gs = { sel: 0, confirm: 0 };
+
+  G.scene('gestione', {
+    hud: false, back: false,
+    enter: function () { gs.sel = 0; gs.confirm = 0; },
+    update: function (dt) { if (gs.confirm > 0) gs.confirm = Math.max(0, gs.confirm - dt); },
+    draw: function (c) {
+      backdrop(c, 'Piloti');
+      var list = G.accounts.list();
+      if (!list.length) { G.go('accesso'); return; }
+      if (gs.sel >= list.length) gs.sel = 0;
+      var a = list[gs.sel];
+
+      // la fila dei piloti, per scegliere su chi si sta lavorando
+      var cw = 128, gap = 14;
+      var x0 = (W - (list.length * cw + (list.length - 1) * gap)) / 2;
+      list.forEach(function (p, i) {
+        G.ui.button({
+          id: 'sel' + p.id, x: x0 + i * (cw + gap), y: 116, w: cw, h: 116, r: 22,
+          color: i === gs.sel ? p.color : G.shade(p.color, -70),
+          label: p.name, fontSize: 22,
+          onTap: function () { gs.sel = i; gs.confirm = 0; G.sfx('pop'); }
+        });
+      });
+
+      kartPreview(c, 300, 470, 200, a.color, 0);
+      G.text(a.name, 300, 520, { ctx: c, size: 36, color: C.cream });
+
+      var bx = 620, bw = 420, bh = 76, bg = 14, y = 262;
+      function row(label, color, onTap, sub) {
+        G.ui.button({ x: bx, y: y, w: bw, h: bh, r: 22, color: color, label: label, sub: sub, fontSize: 28, onTap: onTap });
+        y += bh + bg;
+      }
+      row('Cambia nome', C.bark, function () {
+        G.prompt('Nome del capo stazione', a.name, function (v) {
+          if (v) G.accounts.update(a.id, { name: v.slice(0, 14) });
+        });
+      });
+      row('Cambia colore', C.plum, function () {
+        var i = COLORS.indexOf(a.color);
+        G.accounts.update(a.id, { color: COLORS[(i + 1) % COLORS.length] });
+        G.sfx('pop');
+      });
+      row(gs.confirm > 0 ? 'Sicuro? Tocca ancora' : 'Elimina capo stazione',
+        gs.confirm > 0 ? C.berry : '#5a6472',
+        function () {
+          if (gs.confirm > 0) {
+            if (G.account && G.account.id === a.id) G.accounts.logout();
+            G.accounts.remove(a.id);
+            gs.confirm = 0; gs.sel = 0;
+            G.sfx('bad');
+            if (!G.accounts.list().length) G.go('accesso');
+          } else { gs.confirm = 4; }
+        },
+        gs.confirm > 0 ? 'annulla fra ' + Math.ceil(gs.confirm) + 's' : null);
+
+      G.ui.button({
+        x: W / 2 - 170, y: H - 100, w: 340, h: 80, r: 24, color: C.leaf, label: 'Fatto',
+        onTap: function () { G.go('accesso'); }
+      });
+    }
+  });
+})();
+
+
+/* ==================== 05-menu.js ==================== */
+/* Menu e progressione dei turni della stazione. */
+(function () {
+  'use strict';
+  var C = G.C, W = G.W, H = G.H;
+
+  G.stationSave = function () {
+    var s = G.save.station || (G.save.station = {});
+    if (!s.maxLevel) s.maxLevel = 1;
+    if (!s.level) s.level = 1;
+    if (!s.served) s.served = 0;
+    if (!s.best) s.best = {};
+    return s;
+  };
+
+  G.scene('menu', {
+    hud: true, back: false,
+    enter: function () {
+      var s = G.stationSave();
+      if (G.level === 2 && s.maxLevel < 2 && !s.served) { s.maxLevel = 2; s.level = 2; }
+      setTimeout(function () { if (G.current === 'menu') G.say('Scegli il turno e prepara i binari!'); }, 450);
+    },
+    draw: function (c) {
+      A.stationSky(c);
+      var s = G.stationSave();
+      A.train(c, 640 + Math.sin(G.t * .8) * 14, 300, 180, { color: G.account.color, kind: (Math.floor(G.t / 2) % 3) });
+      G.text('Quale turno facciamo?', W / 2, 420, { ctx: c, size: 34, color: C.ink });
+      var cols = [C.mint, C.water, C.sun, C.tangerine, C.berry];
+      for (var i = 0; i < 5; i++) (function (idx) {
+        var unlocked = idx < s.maxLevel;
+        G.ui.round({
+          id: 'level-' + idx, x: 400 + idx * 120, y: 500, r: 48,
+          color: unlocked ? cols[idx] : '#a9a49d', disabled: !unlocked,
+          label: unlocked ? String(idx + 1) : '•', fontSize: 34,
+          onTap: function () { s.level = idx + 1; G.saveNow(); G.sfx('pop'); }
+        });
+        if (s.level === idx + 1 && unlocked) {
+          c.strokeStyle = C.cream; c.lineWidth = 7; c.beginPath(); c.arc(400 + idx * 120, 500, 57, 0, 7); c.stroke();
+        }
+      })(i);
+      G.ui.button({
+        id: 'play', x: W / 2 - 190, y: 580, w: 380, h: 102, r: 30,
+        color: C.leaf, label: 'Apri la stazione!', fontSize: 36,
+        onTap: function () { G.go('stazione', { level: s.level }); }
+      });
+      G.ui.button({
+        id: 'profiles', x: 22, y: H - 82, w: 210, h: 58, r: 20,
+        color: C.bark, label: 'Cambia capo', fontSize: 22,
+        onTap: function () { G.go('accesso'); }
+      });
+      G.text('Treni accompagnati: ' + s.served, W - 28, H - 44, { ctx: c, size: 22, align: 'right', color: C.ink });
+    }
+  });
+})();
+
+
+/* ==================== 10-stazione.js ==================== */
+/* Il gioco: instrada i treni, libera i binari e dà il via alle partenze. */
+(function () {
+  'use strict';
+  var C = G.C, W = G.W, H = G.H;
+  var TRACK_Y = [312, 454, 596];
+  var TRACK_COL = [C.sun, C.water, C.leafLight];
+  var TRACK_NAME = ['Sole', 'Mare', 'Bosco'];
+  var S = {};
+
+  function setup(level) {
+    level = G.clamp(level || 1, 1, 5);
+    var n = level === 1 ? 1 : level === 2 ? 2 : 3;
+    var total = level < 3 ? 4 : level < 5 ? 5 : 6;
+    S = {
+      level: level, tracks: n, total: total, schedule: [], next: 0,
+      active: null, occupied: [null, null, null], departing: [],
+      arrived: 0, departed: 0, mistakes: 0, hint: -1, idle: 0,
+      message: 'Guarda il simbolo del treno', fine: false, reward: false
+    };
+    var last = -1;
+    for (var i = 0; i < total; i++) {
+      var target = G.rndi(0, n - 1);
+      if (n > 1 && target === last && i % 2) target = (target + 1) % n;
+      S.schedule.push({ target: target, dir: level >= 5 && i % 2 ? -1 : 1, id: i });
+      last = target;
+    }
+    spawn();
+  }
+
+  function spawn() {
+    if (S.active || S.next >= S.schedule.length || S.fine) return;
+    if (S.level < 4 && S.occupied.some(function (v) { return !!v; })) return;
+    var q = S.schedule[S.next++];
+    S.active = {
+      target: q.target, dir: q.dir, id: q.id, phase: 'choose', p: 0,
+      x: q.dir === 1 ? 118 : W - 118, y: 206,
+      color: TRACK_COL[q.target]
+    };
+    S.message = S.occupied[q.target] ? 'Quel binario è occupato: fallo ripartire!' : 'Dove deve arrivare?';
+    S.idle = 0; S.hint = -1;
+    if (G.level === 1) setTimeout(function () { if (G.current === 'stazione' && S.active) G.say(TRACK_NAME[S.active.target] + '! Tocca il binario.'); }, 300);
+  }
+
+  function choose(track) {
+    if (!S.active || S.active.phase !== 'choose' || S.fine) return false;
+    S.idle = 0;
+    if (track !== S.active.target) {
+      S.mistakes++; S.hint = S.active.target; S.message = 'Quasi! Cerca il simbolo ' + TRACK_NAME[S.active.target];
+      G.sfx('pop'); G.fx.text(205, TRACK_Y[track] || 330, '↩', C.tangerine, 54);
+      G.say('Quasi! Cerca ' + TRACK_NAME[S.active.target] + '.');
+      return false;
+    }
+    if (S.occupied[track]) {
+      S.hint = track; S.message = 'Prima dai il via al treno sul binario!'; G.sfx('chime');
+      G.say('Prima fai partire il treno che è già lì.');
+      return false;
+    }
+    S.active.phase = 'moving'; S.active.p = 0; S.hint = -1;
+    S.message = 'Scambio giusto! Il treno sta arrivando'; G.sfx('good');
+    return true;
+  }
+
+  function depart(track) {
+    var t = S.occupied[track];
+    if (!t || !t.ready || S.fine) {
+      if (t) { S.message = 'Aspettiamo che salgano tutti'; G.sfx('tap'); }
+      return false;
+    }
+    S.occupied[track] = null; t.phase = 'departing'; t.p = 0;
+    S.departing.push(t); S.departed++; S.message = 'Via libera! Buon viaggio!';
+    G.sfx('win'); G.fx.confetti(1080, TRACK_Y[track], TRACK_COL[track], 12);
+    if (S.level < 4) spawn();
+    if (S.active && S.active.target === track) S.hint = track;
+    checkDone();
+    return true;
+  }
+
+  function checkDone() {
+    if (S.departed < S.total || S.active || S.occupied.some(function (v) { return !!v; })) return;
+    S.fine = true; S.message = 'Turno completato! Tutti i treni sono partiti';
+    if (!S.reward) {
+      S.reward = true;
+      var save = G.stationSave(); save.served += S.total;
+      save.maxLevel = Math.max(save.maxLevel, Math.min(5, S.level + 1));
+      save.best[S.level] = Math.min(save.best[S.level] === undefined ? 999 : save.best[S.level], S.mistakes);
+      G.saveNow(); G.addStars(1, W / 2, 250); G.addFruits(4 + S.level, W / 2, 300);
+      G.fx.confetti(W / 2, 330, C.sun, 48); G.sfx('win'); G.say('Bravissimo! Tutti i treni sono partiti.');
+    }
+  }
+
+  function update(dt) {
+    if (S.fine) return;
+    S.idle += dt;
+    if (S.active && S.active.phase === 'choose' && S.idle > (G.level === 1 ? 2.6 : 4.5)) S.hint = S.active.target;
+    if (S.active && S.active.phase === 'moving') {
+      var a = S.active; a.p += dt / 1.15;
+      var e = G.easeInOut(a.p), sx = a.dir === 1 ? 118 : W - 118;
+      a.x = G.lerp(sx, 660, e); a.y = G.lerp(206, TRACK_Y[a.target], e);
+      if (a.p >= 1) {
+        a.x = 660; a.y = TRACK_Y[a.target]; a.phase = 'parked'; a.dwell = G.level === 1 ? .45 : .8; a.ready = false;
+        S.occupied[a.target] = a; S.active = null; S.arrived++;
+        S.message = 'Aspettiamo i passeggeri…';
+        if (S.level >= 4) spawn();
+      }
+    }
+    S.occupied.forEach(function (t, i) {
+      if (!t || t.ready) return;
+      t.dwell -= dt;
+      if (t.dwell <= 0) { t.ready = true; S.message = 'Verde! Tocca il segnale per partire'; G.sfx('chime'); if (G.level === 1) G.say('Tocca il segnale verde!'); }
+    });
+    for (var i = S.departing.length - 1; i >= 0; i--) {
+      var d = S.departing[i]; d.p += dt / 1.05;
+      d.x = G.lerp(660, d.dir === 1 ? W + 180 : -180, G.easeIn(d.p));
+      if (d.p >= 1) S.departing.splice(i, 1);
+    }
+    if (!S.active) spawn();
+    checkDone();
+  }
+
+  function rails(c) {
+    c.fillStyle = '#d4bf95'; c.fillRect(0, 202, W, H - 202);
+    for (var i = 0; i < S.tracks; i++) {
+      var y = TRACK_Y[i];
+      c.fillStyle = 'rgba(255,255,255,.44)'; G.roundRect(c, 172, y - 53, 835, 106, 20); c.fill();
+      c.strokeStyle = '#62594e'; c.lineWidth = 8;
+      c.beginPath(); c.moveTo(0, 220); c.bezierCurveTo(210, 220, 220, y, 405, y); c.lineTo(W, y); c.stroke();
+      c.beginPath(); c.moveTo(0, 238); c.bezierCurveTo(210, 238, 220, y + 18, 405, y + 18); c.lineTo(W, y + 18); c.stroke();
+      c.strokeStyle = '#8b765b'; c.lineWidth = 5;
+      for (var x = 220; x < W; x += 52) { c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x, y + 27); c.stroke(); }
+      c.fillStyle = TRACK_COL[i]; G.roundRect(c, 246, y - 45, 150, 54, 17); c.fill();
+      A.destination(c, 275, y - 18, 21, i);
+      G.text('Binario ' + (i + 1), 300, y - 18, { ctx: c, size: 20, align: 'left', color: C.ink });
+    }
+  }
+
+  function draw(c) {
+    A.stationSky(c); rails(c);
+    G.text('Turno ' + S.level, 34, 114, { ctx: c, size: 28, align: 'left', color: C.ink });
+    G.text((S.departed) + ' / ' + S.total + ' partiti', 34, 151, { ctx: c, size: 21, align: 'left', color: C.ink });
+    c.fillStyle = 'rgba(255,246,224,.94)'; G.roundRect(c, 310, 154, 660, 62, 24); c.fill();
+    G.text(S.message, 640, 185, { ctx: c, size: 25, color: C.ink, maxWidth: 620 });
+
+    for (var i = 0; i < S.tracks; i++) (function (idx) {
+      var pulse = S.hint === idx ? 1 + Math.sin(G.t * 7) * .08 : 1;
+      c.save(); c.translate(105, TRACK_Y[idx]); c.scale(pulse, pulse);
+      G.ui.round({
+        id: 'route-' + idx, x: 0, y: 0, r: 46, color: TRACK_COL[idx],
+        icon: function (cc, x, y) { A.destination(cc, x, y, 25, idx); },
+        onTap: function () { choose(idx); }
+      }); c.restore();
+      var occ = S.occupied[idx];
+      A.signal(c, 1085, TRACK_Y[idx] - 18, 34, !!(occ && occ.ready));
+      G.ui.round({
+        id: 'signal-' + idx, x: 1085, y: TRACK_Y[idx] - 18, r: 43,
+        color: 'rgba(0,0,0,0)', silent: true,
+        onTap: function () { depart(idx); }
+      });
+    })(i);
+
+    S.occupied.forEach(function (t) { if (t) A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir }); });
+    S.departing.forEach(function (t) { A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir }); });
+    if (S.active) A.train(c, S.active.x, S.active.y, 125, { color: S.active.color, kind: S.active.target, dir: S.active.dir });
+
+    if (S.level >= 5 && S.next < S.schedule.length) {
+      c.fillStyle = 'rgba(255,246,224,.92)'; G.roundRect(c, W - 205, 112, 165, 92, 22); c.fill();
+      G.text('Prossimo', W - 122, 136, { ctx: c, size: 18, color: C.ink });
+      A.destination(c, W - 122, 173, 26, S.schedule[S.next].target);
+    }
+    if (S.fine) {
+      c.fillStyle = 'rgba(31,55,42,.80)'; c.fillRect(0, 0, W, H);
+      c.fillStyle = C.cream; G.roundRect(c, 280, 130, 720, 460, 42); c.fill();
+      G.text('Stazione perfetta!', W / 2, 222, { ctx: c, size: 55, color: C.leafDark });
+      A.train(c, W / 2, 350, 185, { color: G.account.color, kind: S.level % 3 });
+      G.text(S.mistakes ? 'Abbiamo corretto insieme ' + S.mistakes + ' scambi' : 'Tutti gli scambi al primo colpo!', W / 2, 455, { ctx: c, size: 27, color: C.ink });
+      G.ui.button({ id: 'again', x: 345, y: 500, w: 275, h: 76, r: 24, color: C.water, label: 'Ancora!', onTap: function () { setup(S.level); } });
+      G.ui.button({ id: 'menu', x: 660, y: 500, w: 275, h: 76, r: 24, color: C.leaf, label: 'Al deposito', onTap: function () { G.go('menu'); } });
+    }
+  }
+
+  G.stationState = function () {
+    return {
+      level: S.level, tracks: S.tracks, total: S.total, next: S.next,
+      active: S.active && { target: S.active.target, phase: S.active.phase },
+      occupied: S.occupied.map(function (t) { return t && { ready: t.ready, target: t.target }; }),
+      arrived: S.arrived, departed: S.departed, mistakes: S.mistakes, fine: S.fine
+    };
+  };
+  G.stationChoose = choose;
+  G.stationDepart = depart;
+
+  G.scene('stazione', {
+    hud: true,
+    enter: function (p) { setup((p && p.level) || G.stationSave().level || 1); },
+    update: update,
+    draw: draw
+  });
+})();
+
+
+/* ==================== 99-boot.js ==================== */
+/* Boot: tablet niceties, then "chi dirige la stazione?".
+
+   Per un pezzo qui veniva creato un profilo in silenzio, perche' il gioco non
+   aveva ancora niente da ricordare. Adesso ne ha: giro migliore per pista,
+   vittorie, difficolta', colore del kart. Due bambini sullo stesso tablet
+   vogliono due elenchi di record, non uno mescolato — quindi si comincia da
+   dove si comincia in Dino Giungla, e per la stessa ragione. */
+(function () {
+  'use strict';
+
+  G.toggleFullscreen = function () {
+    var el = document.documentElement;
+    try {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else {
+        (el.requestFullscreen || el.webkitRequestFullscreen).call(el, { navigationUI: 'hide' });
+      }
+    } catch (e) { /* desktop browsers may refuse; harmless */ }
+  };
+
+  var askedFullscreen = false;
+  function firstTouch() {
+    G.resumeAudio();
+    if (!askedFullscreen) {
+      askedFullscreen = true;
+      if (matchMedia('(pointer: coarse)').matches && !document.fullscreenElement) G.toggleFullscreen();
+    }
+    keepAwake();
+  }
+  window.addEventListener('pointerdown', firstTouch, { once: false, passive: true });
+
+  var lock = null;
+  function keepAwake() {
+    if (lock || !navigator.wakeLock) return;
+    navigator.wakeLock.request('screen').then(function (l) {
+      lock = l;
+      l.addEventListener('release', function () { lock = null; });
+    }).catch(function () { lock = null; });
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) keepAwake();
+  });
+
+  if (window.speechSynthesis) { try { speechSynthesis.getVoices(); } catch (e) {} }
+
+  /* The engine came from another Dino game. Here home is the station menu, and
+     without this the back button would call G.go on a scene that does not exist. */
+  G.home = function () { G.go(G.account ? 'menu' : 'accesso'); };
+
+  /* Si passa SEMPRE dalla schermata dei piloti, anche con un profilo solo:
+     e' li' che l'altro fratello si accorge di poterne fare uno suo. */
+  G.start('accesso');
+})();
+</script>
+<script>
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('sw.js').catch(function () {});
+  });
+}
+</script>
+</body>
+</html>
