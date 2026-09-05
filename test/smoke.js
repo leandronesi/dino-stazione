@@ -110,7 +110,7 @@ if (!G.stationState().active || G.stationState().active.phase !== 'choose-route'
   fail('toccando il trenino non si apre la scelta del binario');
 }
 pump(2); // un frame registra i binari appena aperti per il secondo tocco reale
-tap(105, 312);
+tap(1140, 160);
 if (!G.stationState().active || G.stationState().active.phase !== 'moving') {
   fail('il binario non riceve il tap dopo aver toccato il trenino');
 }
@@ -129,6 +129,7 @@ function completeLevel(level) {
         G.stationTapTrain(t.id);
         const opened = (G.stationState().actives || []).find(x => x.id === t.id);
         if (opened && opened.phase === 'choose-route') G.stationChoose(opened.target);
+      } else if(t.phase === 'waiting'){G.stationTapTrain(t.id);
       } else if (t.phase === 'choose-route') {
         G.stationTapTrain(t.id);
         G.stationChoose(t.target);

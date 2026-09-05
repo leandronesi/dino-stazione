@@ -13,7 +13,7 @@
    not answered in NAV_TIMEOUT we serve the cached game and let the download
    finish in the background, so the next launch is fresh. A child must never sit
    in front of a white screen because the router is having a bad day. */
-var CACHE = 'dino-stazione-4dc9cf8b10';
+var CACHE = 'dino-stazione-9b785b2e01';
 var NAV_TIMEOUT = 2500;
 var SHELL = [
   './',
@@ -38,7 +38,7 @@ self.addEventListener('activate', function (e) {
   e.waitUntil(
     caches.keys()
       .then(function (keys) {
-        return Promise.all(keys.filter(function (k) { return k !== CACHE; }).map(function (k) { return caches.delete(k); }));
+        return Promise.all(keys.filter(function (k) { return k.indexOf('dino-stazione-') === 0 && k !== CACHE; }).map(function (k) { return caches.delete(k); }));
       })
       .then(function () { return self.clients.claim(); })
   );

@@ -132,7 +132,7 @@ html, body {
 
   function resize() {
     var cw = window.innerWidth, ch = window.innerHeight;
-    var dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    var dpr = Math.min(window.devicePixelRatio || 1, 1.5, 1440 / Math.max(window.innerWidth, window.innerHeight));
     view.dpr = dpr;
     view.s = Math.min(cw / W, ch / H);
     view.ox = (cw - W * view.s) / 2;
@@ -348,6 +348,7 @@ html, body {
     login: function (id) {
       var a = G.accounts.byId(id);
       if (!a) return false;
+      if (G.account) writeSave();
       G.account = a;
       G.profile = a.id;
       G.level = a.level;
@@ -984,6 +985,786 @@ var A = window.A = window.A || {};
 })();
 
 
+/* ==================== 01z-family-art.js ==================== */
+/* Dino Giungla — procedural art library (namespace `A`).
+   Everything is drawn with canvas paths: no images, no external fonts, no emoji.
+   House style: chubby rounded shapes, thick dark outline, warm saturated colors,
+   big friendly eyes with a specular dot.
+   Outline technique used everywhere: build the path (one or more subpaths),
+   stroke it thick with INK, then fill it — the fill covers the inner half of the
+   stroke and merges overlapping subpaths into a single silhouette. */
+(function () {
+  'use strict';
+
+  var G = window.G || {};
+  var C = G.C || {};
+  var INK = C.ink || '#2b1d12';
+  var TAU = 6.2831853;
+  var A = (window.A = window.A || {});
+
+  /* ------------------------------------------------------------- primitives */
+  function _clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function _shade(col, amt) { return G.shade ? G.shade(col, amt) : col; }
+  function _rgba(hex, a) {
+    var m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || '');
+    if (!m) return 'rgba(40,25,10,' + a + ')';
+    return 'rgba(' + parseInt(m[1], 16) + ',' + parseInt(m[2], 16) + ',' + parseInt(m[3], 16) + ',' + a + ')';
+  }
+  // deterministic pseudo-random, stable across frames
+  function _rnd(i) { var v = Math.sin(i * 127.1 + 311.7) * 43758.5453; return v - Math.floor(v); }
+  // outline width for a shape of size s
+  function _lw(s) { return _clamp(s * 0.034, 2.2, 5.5); }
+
+  // subpath adders: always moveTo first, otherwise arc/ellipse joins the previous subpath
+  function _cp(c, x, y, r) { r = Math.max(0.2, r); c.moveTo(x + r, y); c.arc(x, y, r, 0, TAU); }
+  function _ep(c, x, y, rx, ry, rot) {
+    rx = Math.max(0.2, rx); ry = Math.max(0.2, ry); rot = rot || 0;
+    c.moveTo(x + rx * Math.cos(rot), y + rx * Math.sin(rot));
+    c.ellipse(x, y, rx, ry, rot, 0, TAU);
+  }
+  function _smile(c, cx, cy, r, k) {
+    c.moveTo(cx - r, cy); c.quadraticCurveTo(cx, cy + r * k * 2, cx + r, cy);
+  }
+  function _circ(c, x, y, r) { c.beginPath(); _cp(c, x, y, r); }
+  function _ell(c, x, y, rx, ry, rot) { c.beginPath(); _ep(c, x, y, rx, ry, rot); }
+
+  /* Stroke-then-fill the path already built on `c`. lw = visible outline width. */
+  function _shape(c, col, lw) {
+    c.lineJoin = 'round'; c.lineCap = 'round';
+    if (lw > 0) { c.strokeStyle = INK; c.lineWidth = lw * 2; c.stroke(); }
+    c.fillStyle = col; c.fill();
+  }
+  /* Thick round limb: dark casing + colored core, one path, two strokes. */
+  function _limb(c, x0, y0, x1, y1, w, col, lw) {
+    c.lineCap = 'round'; c.lineJoin = 'round';
+    c.beginPath(); c.moveTo(x0, y0); c.lineTo(x1, y1);
+    c.strokeStyle = INK; c.lineWidth = w + lw * 2; c.stroke();
+    c.strokeStyle = col; c.lineWidth = w; c.stroke();
+  }
+  function _starPath(c, x, y, r, inner) {
+    var i, a, rr; inner = inner || 0.46;
+    c.beginPath();
+    for (i = 0; i < 10; i++) {
+      a = -Math.PI / 2 + i * Math.PI / 5;
+      rr = i % 2 ? r * inner : r;
+      c[i ? 'lineTo' : 'moveTo'](x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+    }
+    c.closePath();
+  }
+  /* Small glossy highlight, the thing that makes plastic toys look like toys. */
+  function _gloss(c, x, y, rx, ry, rot, a) {
+    c.save(); c.globalAlpha = a === undefined ? 0.30 : a;
+    _ell(c, x, y, rx, ry, rot); c.fillStyle = '#ffffff'; c.fill();
+    c.restore();
+  }
+
+  /* cached gradients (fixed screen coordinates only — never per-entity) */
+  var _gc = {};
+  function _lgrad(c, key, x0, y0, x1, y1, stops) {
+    var g = _gc[key], i;
+    if (!g) {
+      g = c.createLinearGradient(x0, y0, x1, y1);
+      for (i = 0; i < stops.length; i++) g.addColorStop(stops[i][0], stops[i][1]);
+      _gc[key] = g;
+    }
+    return g;
+  }
+  function _rgrad(c, key, x, y, r0, r1, stops) {
+    var g = _gc[key], i;
+    if (!g) {
+      g = c.createRadialGradient(x, y, r0, x, y, r1);
+      for (i = 0; i < stops.length; i++) g.addColorStop(stops[i][0], stops[i][1]);
+      _gc[key] = g;
+    }
+    return g;
+  }
+
+  /* ==================================================================== EYES */
+  /* mode: 'open' | 'closed' | 'star' | 'up'. blink 0..1 = vertical openness. */
+  function _eye(c, x, y, r, mode, blink, look, lw, rot) {
+    var pr = r * 0.52, px = x + look * r * 0.30, py = y + r * 0.10;
+    if (mode === 'star') {
+      c.fillStyle = C.sun || '#ffd75e';
+      _starPath(c, x, y, r * 1.15, 0.42);
+      c.strokeStyle = INK; c.lineWidth = lw * 1.2; c.lineJoin = 'round';
+      c.stroke(); c.fill();
+      return;
+    }
+    if (mode === 'closed') {
+      c.strokeStyle = INK; c.lineWidth = lw * 1.35; c.lineCap = 'round';
+      c.beginPath(); c.arc(x, y - r * 0.25, r * 0.92, 0.62, Math.PI - 0.62); c.stroke();
+      return;
+    }
+    var open = _clamp(blink, 0.05, 1);
+    if (open < 0.22) {
+      c.strokeStyle = INK; c.lineWidth = lw * 1.35; c.lineCap = 'round';
+      c.beginPath(); c.moveTo(x - r * 0.8, y); c.lineTo(x + r * 0.8, y); c.stroke();
+      return;
+    }
+    _ell(c, x, y, r, r * 1.06 * open, rot || 0);
+    _shape(c, '#ffffff', lw * 0.85);
+    if (mode === 'up') py = y - r * 0.18;
+    c.fillStyle = INK;
+    _ell(c, px, py, pr, pr * 1.05 * open, rot || 0); c.fill();
+    c.fillStyle = '#ffffff';
+    _ell(c, px - pr * 0.34, py - pr * 0.42 * open, pr * 0.42, pr * 0.40 * open, 0); c.fill();
+    c.globalAlpha = 0.6;
+    _ell(c, px + pr * 0.30, py + pr * 0.40 * open, pr * 0.20, pr * 0.18 * open, 0); c.fill();
+    c.globalAlpha = 1;
+  }
+
+  /* =================================================================== DINO */
+  A.dino = function (ctx, x, y, s, o) {
+    o = o || {};
+    s = s > 0 ? s : 160;
+    var t = (o.t === undefined || o.t === null) ? (G.t || 0) : o.t;
+    var face = o.facing === -1 ? -1 : 1;
+    var pose = o.pose || 'idle';
+    var col = o.color || C.dino || '#57c98a';
+    var dk = _shade(col, -48), lt = _shade(col, 32);
+    var lw = _lw(s), u = s, i, a;
+
+    /* What this dino is wearing (see G.look in 01c-art-gear.js).
+       Contract: a caller that specifies appearance must specify ALL of it. If
+       `gear` is given we use it; if only `hat` is given the caller is drawing
+       somebody else's dino, so we add nothing; only when neither is given do we
+       fall back to the current save. That is what keeps the "Chi gioca?" cards
+       from putting the current player's glasses on every sibling. */
+    var L = o.gear || ((o.hat === undefined && typeof G.look === 'function') ? G.look() : null);
+    var hatId = o.hat !== undefined ? o.hat : (L ? L.testa : null);
+
+    /* ---- pose parameters */
+    var breath = Math.sin(t * 2.1) * 0.010;
+    var bob = 0, hop = 0, tailA = Math.sin(t * 1.5) * 0.12, tilt = 0;
+    var legPh = 0, armF = 0.80, armB = 1.05, eyes = 'open', blink = 1, walking = 0;
+    if (pose === 'walk') {
+      walking = 1;
+      legPh = Math.sin(t * 8.4);
+      bob = Math.abs(Math.sin(t * 8.4)) * 0.020;
+      tailA = Math.sin(t * 8.4 + 1.2) * 0.34;
+      armF = 0.80 + legPh * 0.55; armB = 1.05 - legPh * 0.55;
+      tilt = 0.03;
+    } else if (pose === 'happy') {
+      hop = Math.abs(Math.sin(t * 5.0)) * 0.10;
+      tailA = Math.sin(t * 9.0) * 0.38;
+      armF = -1.80 + Math.sin(t * 13) * 0.26;
+      armB = -2.05 - Math.sin(t * 13) * 0.26;
+      eyes = 'star';
+      bob = -hop * 0.10;
+    } else if (pose === 'think') {
+      tilt = 0.16; eyes = 'up';
+      armB = 1.10;
+      bob = Math.sin(t * 1.6) * 0.006;
+    } else if (pose === 'sleep') {
+      breath = Math.sin(t * 1.05) * 0.024;
+      eyes = 'closed'; armF = 1.30; armB = 1.42;
+      bob = 0.010 + Math.sin(t * 1.05) * 0.005;
+      tailA = Math.sin(t * 0.9) * 0.05;
+      tilt = 0.10;
+    } else {
+      bob = Math.sin(t * 2.1) * 0.008;
+      var bt = t % 3.7;
+      if (bt < 0.16) blink = _clamp(Math.abs(bt - 0.08) / 0.08, 0.05, 1);
+    }
+
+    /* ---- geometry (local space: origin at the feet, y up = negative) */
+    var byy = -0.475 * u - bob * u;                 // body centre
+    var brx = 0.288 * u, bry = (0.272 + breath) * u;
+    var hr = 0.205 * u;
+    var hx = 0.055 * u, hy = -0.795 * u - bob * u - breath * u * 0.5;
+    var pvx = hx, pvy = hy + hr * 0.86;             // head tilt pivot (the neck)
+    var cs = Math.cos(tilt), sn = Math.sin(tilt);
+    function rx_(px, py) { var dx = px - pvx, dy = py - pvy; return pvx + dx * cs - dy * sn; }
+    function ry_(px, py) { var dx = px - pvx, dy = py - pvy; return pvy + dx * sn + dy * cs; }
+
+    var sxr = hx + hr * 0.86, syr = hy + hr * 0.34;  // snout (pre-tilt)
+    var srx = hr * 0.66, sry = hr * 0.50;
+    var sx = rx_(sxr, syr), sy = ry_(sxr, syr);
+    var hcx = rx_(hx, hy), hcy = ry_(hx, hy);
+
+    ctx.save();
+
+    /* ---- ground shadow (stays put while hopping) */
+    ctx.globalAlpha = 0.22 * (1 - hop * 3.2);
+    if (ctx.globalAlpha > 0.01) {
+      _ell(ctx, x, y - u * 0.012, u * 0.30 * (1 - hop * 1.2), u * 0.072 * (1 - hop * 0.9), 0);
+      ctx.fillStyle = '#1b2a10'; ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.translate(x, y - hop * u);
+    ctx.scale(face, 1);
+
+    /* ---- tail (behind everything) */
+    var tipx = -0.60 * u, tipy = byy - 0.05 * u - tailA * 0.20 * u;
+    ctx.beginPath();
+    ctx.moveTo(-0.20 * u, byy - 0.11 * u);
+    ctx.quadraticCurveTo(-0.44 * u, byy - 0.30 * u - tailA * 0.16 * u, tipx, tipy);
+    ctx.quadraticCurveTo(-0.42 * u, byy + 0.20 * u - tailA * 0.08 * u, -0.18 * u, byy + 0.16 * u);
+    ctx.closePath();
+    _shape(ctx, col, lw);
+
+    /* ---- crest: spikes along the back + three on the tail */
+    ctx.beginPath();
+    for (i = 0; i < 4; i++) {
+      a = -2.56 + i * 0.20;
+      var e0 = a - 0.11, e1 = a + 0.11;
+      ctx.moveTo(brx * Math.cos(e0), byy + bry * Math.sin(e0));
+      ctx.lineTo(brx * 1.30 * Math.cos(a), byy + bry * 1.32 * Math.sin(a));
+      ctx.lineTo(brx * Math.cos(e1), byy + bry * Math.sin(e1));
+      ctx.closePath();
+    }
+    for (i = 0; i < 3; i++) {
+      var p = 0.34 + i * 0.24, q = 1 - p;
+      var qx = q * q * (-0.20 * u) + 2 * q * p * (-0.44 * u) + p * p * tipx;
+      var qy = q * q * (byy - 0.11 * u) + 2 * q * p * (byy - 0.30 * u - tailA * 0.16 * u) + p * p * tipy;
+      var sz = (0.062 - i * 0.012) * u;
+      ctx.moveTo(qx - sz * 0.8, qy + sz * 0.30);
+      ctx.lineTo(qx - sz * 0.15, qy - sz * 1.25);
+      ctx.lineTo(qx + sz * 0.7, qy + sz * 0.10);
+      ctx.closePath();
+    }
+    _shape(ctx, _shade(col, -22), lw * 0.9);
+
+    /* ---- tail gear: sits on the tail, behind the body, and rides the wag.
+       Drawn at p = 0.70 along the quadratic, where the tail still has some
+       thickness, rotated onto the curve's tangent so it never floats. */
+    if (L && L.coda && A.gear) {
+      var tp = 0.70, tq = 1 - tp;
+      var tcx = tq * tq * (-0.20 * u) + 2 * tq * tp * (-0.44 * u) + tp * tp * tipx;
+      var tcy = tq * tq * (byy - 0.11 * u) + 2 * tq * tp * (byy - 0.30 * u - tailA * 0.16 * u) + tp * tp * tipy;
+      var tdx = 2 * tq * (-0.24 * u) + 2 * tp * (tipx + 0.44 * u);
+      var tdy = 2 * tq * (-0.19 * u - tailA * 0.16 * u) + 2 * tp * (tipy - byy + 0.30 * u + tailA * 0.16 * u);
+      ctx.save();
+      ctx.translate(tcx, tcy);
+      ctx.rotate(Math.atan2(tdy, tdx));
+      A.gear(ctx, L.coda, 0, 0, u * 0.088, { lw: lw });
+      ctx.restore();
+    }
+
+    /* ---- far limbs (darker, read as depth) */
+    var hipY = byy + 0.16 * u;
+    var bLegX = -0.055 * u - (walking ? legPh * 0.10 * u : 0);
+    var bLift = walking ? Math.max(0, -legPh) * 0.075 * u : 0;
+    _limb(ctx, -0.05 * u, hipY, bLegX, -0.045 * u - bLift, u * 0.125, dk, lw);
+    _ell(ctx, bLegX + u * 0.012, -u * 0.036 - bLift, u * 0.098, u * 0.052, 0);
+    _shape(ctx, dk, lw);
+
+    var shx = 0.135 * u, shy = byy - 0.045 * u, aL = u * 0.185;
+    var bhx = shx + Math.cos(armB) * aL, bhy = shy + Math.sin(armB) * aL;
+    _limb(ctx, shx, shy, bhx, bhy, u * 0.085, dk, lw);
+    _circ(ctx, bhx, bhy, u * 0.055); _shape(ctx, dk, lw);
+
+    /* ---- body + head + snout as one merged silhouette */
+    ctx.beginPath();
+    _ep(ctx, 0, byy, brx, bry, 0);
+    _ep(ctx, 0.03 * u, byy - bry * 0.62, brx * 0.62, bry * 0.62, 0);   // chest/neck filler
+    _ep(ctx, hcx, hcy, hr, hr * 0.98, tilt);
+    _ep(ctx, sx, sy, srx, sry, tilt);
+    _shape(ctx, col, lw);
+
+    /* ---- belly + volume highlight */
+    ctx.globalAlpha = 0.95;
+    _ell(ctx, 0.085 * u, byy + 0.055 * u, 0.168 * u, 0.185 * u, 0);
+    ctx.fillStyle = C.dinoBelly || '#f6e7c1'; ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = _rgba(_shade(C.dinoBelly || '#f6e7c1', -40), 0.55);
+    ctx.lineWidth = lw * 0.55; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-0.03 * u, byy + 0.01 * u); ctx.quadraticCurveTo(0.085 * u, byy + 0.055 * u, 0.20 * u, byy + 0.01 * u);
+    ctx.moveTo(-0.02 * u, byy + 0.115 * u); ctx.quadraticCurveTo(0.085 * u, byy + 0.155 * u, 0.19 * u, byy + 0.115 * u);
+    ctx.stroke();
+    ctx.globalAlpha = 0.35;
+    _ell(ctx, -0.03 * u, byy - bry * 0.66, brx * 0.42, bry * 0.20, -0.25);
+    ctx.fillStyle = lt; ctx.fill();
+    ctx.globalAlpha = 1;
+
+    /* ---- neck gear: anchored to the tilt pivot, NOT to the chest ellipse.
+       pvy carries bob plus half the breath while bry carries the whole breath,
+       so anchoring on the chest opens a gap in time with the breathing.
+       Drawn before the near limbs on purpose: in 'happy' the raised arm passes
+       over it, which is where an arm belongs. */
+    if (L && L.collo && A.gear) {
+      A.gear(ctx, L.collo, 0.03 * u, pvy + hr * 0.30, u * 0.26, { lw: lw });
+    }
+
+    /* ---- near limbs */
+    var fLegX = 0.105 * u + (walking ? legPh * 0.10 * u : 0);
+    var fLift = walking ? Math.max(0, legPh) * 0.075 * u : 0;
+    _limb(ctx, 0.075 * u, hipY, fLegX, -0.045 * u - fLift, u * 0.135, col, lw);
+    _ell(ctx, fLegX + u * 0.016, -u * 0.036 - fLift, u * 0.105, u * 0.056, 0);
+    _shape(ctx, col, lw);
+    ctx.strokeStyle = _rgba(INK, 0.45); ctx.lineWidth = lw * 0.6;
+    ctx.beginPath();
+    ctx.moveTo(fLegX + u * 0.055, -u * 0.062 - fLift); ctx.lineTo(fLegX + u * 0.062, -u * 0.020 - fLift);
+    ctx.moveTo(fLegX + u * 0.008, -u * 0.070 - fLift); ctx.lineTo(fLegX + u * 0.010, -u * 0.016 - fLift);
+    ctx.stroke();
+
+    var fhx, fhy;
+    if (pose === 'think') { fhx = sx + srx * 0.30; fhy = sy + sry * 1.35; }
+    else { fhx = shx + Math.cos(armF) * aL; fhy = shy + Math.sin(armF) * aL; }
+    _limb(ctx, shx, shy, fhx, fhy, u * 0.095, col, lw);
+    _circ(ctx, fhx, fhy, u * 0.062); _shape(ctx, col, lw);
+
+    /* ---- face */
+    var mx = sx + Math.sin(tilt) * 0 + srx * 0.02, my = sy + sry * 0.40;
+    ctx.strokeStyle = INK; ctx.lineWidth = lw * 1.05; ctx.lineCap = 'round';
+    if (pose === 'happy') {
+      ctx.beginPath();
+      ctx.moveTo(mx - srx * 0.55, my - sry * 0.18);
+      ctx.quadraticCurveTo(mx, my + sry * 0.85, mx + srx * 0.58, my - sry * 0.18);
+      ctx.closePath();
+      ctx.fillStyle = '#5b2233'; ctx.fill(); ctx.stroke();
+      _ell(ctx, mx + srx * 0.02, my + sry * 0.42, srx * 0.30, sry * 0.24, 0);
+      ctx.fillStyle = C.pinkPop || '#ff6fae'; ctx.fill();
+    } else if (pose === 'sleep') {
+      ctx.beginPath(); _smile(ctx, mx, my, srx * 0.46, 0.35); ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(mx - srx * 0.48, my - sry * 0.12);
+      ctx.quadraticCurveTo(mx, my + sry * 0.52, mx + srx * 0.52, my - sry * 0.14);
+      ctx.stroke();
+    }
+    // nostril
+    ctx.fillStyle = _rgba(INK, 0.7);
+    _ell(ctx, sx + srx * 0.42 - sn * sry * 0.4, sy - sry * 0.42, srx * 0.13, sry * 0.15, tilt); ctx.fill();
+    // cheek
+    ctx.globalAlpha = 0.32;
+    _ell(ctx, rx_(hx + hr * 0.62, hy + hr * 0.40), ry_(hx + hr * 0.62, hy + hr * 0.40), hr * 0.24, hr * 0.16, tilt);
+    ctx.fillStyle = C.pinkPop || '#ff6fae'; ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // eyes
+    var e1x = hx - hr * 0.24, e1y = hy - hr * 0.20;
+    var e2x = hx + hr * 0.46, e2y = hy - hr * 0.16;
+    var lk = pose === 'think' ? -0.6 : 0.55;
+    _eye(ctx, rx_(e1x, e1y), ry_(e1x, e1y), hr * 0.29, eyes, blink, lk, lw, tilt);
+    _eye(ctx, rx_(e2x, e2y), ry_(e2x, e2y), hr * 0.31, eyes, blink, lk, lw, tilt);
+    // brows for the "think" pose
+    if (pose === 'think') {
+      ctx.strokeStyle = INK; ctx.lineWidth = lw * 1.1; ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(rx_(e1x - hr * 0.24, e1y - hr * 0.46), ry_(e1x - hr * 0.24, e1y - hr * 0.46));
+      ctx.lineTo(rx_(e1x + hr * 0.20, e1y - hr * 0.58), ry_(e1x + hr * 0.20, e1y - hr * 0.58));
+      ctx.moveTo(rx_(e2x - hr * 0.18, e2y - hr * 0.60), ry_(e2x - hr * 0.18, e2y - hr * 0.60));
+      ctx.lineTo(rx_(e2x + hr * 0.26, e2y - hr * 0.44), ry_(e2x + hr * 0.26, e2y - hr * 0.44));
+      ctx.stroke();
+    }
+
+    /* ---- eye gear + hat (both ride with the head tilt, drawn pre-tilt) */
+    if (L && L.occhi && A.gear) {
+      ctx.save();
+      ctx.translate(pvx, pvy); ctx.rotate(tilt); ctx.translate(-pvx, -pvy);
+      // midpoint of the two pupils: they sit at hx-0.24hr and hx+0.46hr
+      A.gear(ctx, L.occhi, hx + hr * 0.11, hy - hr * 0.18, hr * 0.70, { eyes: eyes, lw: lw });
+      ctx.restore();
+    }
+    if (hatId) {
+      ctx.save();
+      ctx.translate(pvx, pvy); ctx.rotate(tilt); ctx.translate(-pvx, -pvy);
+      A.hat(ctx, hx + hr * 0.06, hy - hr * 0.86, hr * 1.95, hatId);
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    /* ---- floating extras, drawn unmirrored so text is never flipped */
+    if (pose === 'sleep') {
+      ctx.save();
+      for (i = 0; i < 3; i++) {
+        var ph = ((t * 0.42) + i * 0.34) % 1;
+        ctx.globalAlpha = Math.sin(ph * Math.PI) * 0.9;
+        if (G.text) {
+          G.text('z', x + face * (0.24 * u + ph * 0.16 * u), y - u * (1.02 + ph * 0.34), {
+            ctx: ctx, size: u * (0.11 + ph * 0.09), color: C.cream || '#fff6e0',
+            stroke: _rgba(INK, 0.55)
+          });
+        }
+      }
+      ctx.restore();
+    } else if (pose === 'think') {
+      ctx.save();
+      for (i = 0; i < 3; i++) {
+        var ph2 = ((t * 0.55) + i * 0.33) % 1;
+        ctx.globalAlpha = Math.sin(ph2 * Math.PI) * 0.85;
+        _circ(ctx, x - face * (0.16 * u) - face * ph2 * 0.10 * u, y - u * (1.02 + ph2 * 0.30), u * (0.018 + ph2 * 0.030));
+        _shape(ctx, C.cream || '#fff6e0', lw * 0.55);
+      }
+      ctx.restore();
+    }
+  };
+
+  /* ================================================================== FRUIT */
+  /* (x,y) = centre, r ≈ half the height. Must stay readable down to r = 18
+     because the core HUD and the reward flyers draw fruit at ~20px. */
+  A.fruit = function (ctx, x, y, r, kind) {
+    r = r > 0 ? r : 20;
+    var lw = _clamp(r * 0.16, 1.8, 4.2);
+    ctx.save();
+    switch (kind) {
+      case 'banana':
+        ctx.beginPath();
+        ctx.moveTo(x - r * 0.86, y - r * 0.52);
+        ctx.quadraticCurveTo(x - r * 0.30, y + r * 1.02, x + r * 0.90, y + r * 0.46);
+        ctx.quadraticCurveTo(x - r * 0.10, y + r * 0.46, x - r * 0.52, y - r * 0.62);
+        ctx.closePath();
+        _shape(ctx, '#ffd93d', lw);
+        ctx.fillStyle = '#e0a53a';
+        _ell(ctx, x - r * 0.70, y - r * 0.56, r * 0.16, r * 0.13, -0.5); ctx.fill();
+        _ell(ctx, x + r * 0.84, y + r * 0.48, r * 0.14, r * 0.12, 0.3); ctx.fill();
+        _gloss(ctx, x - r * 0.10, y + r * 0.05, r * 0.42, r * 0.11, 0.55, 0.38);
+        break;
+
+      case 'uva':
+        ctx.strokeStyle = C.bark || '#7a4a26'; ctx.lineWidth = lw * 1.1; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(x, y - r * 0.62); ctx.lineTo(x + r * 0.10, y - r * 1.02); ctx.stroke();
+        ctx.beginPath();
+        _cp(ctx, x - r * 0.44, y - r * 0.26, r * 0.36);
+        _cp(ctx, x + r * 0.40, y - r * 0.28, r * 0.36);
+        _cp(ctx, x, y - r * 0.02, r * 0.38);
+        _cp(ctx, x - r * 0.40, y + r * 0.40, r * 0.35);
+        _cp(ctx, x + r * 0.38, y + r * 0.38, r * 0.35);
+        _cp(ctx, x, y + r * 0.72, r * 0.32);
+        _shape(ctx, C.plum || '#8f5bd6', lw);
+        ctx.fillStyle = C.leaf || '#2f8f4e';
+        _ell(ctx, x + r * 0.44, y - r * 0.92, r * 0.30, r * 0.17, -0.5);
+        _shape(ctx, C.leaf || '#2f8f4e', lw * 0.8);
+        _gloss(ctx, x - r * 0.44, y - r * 0.38, r * 0.16, r * 0.11, -0.6, 0.45);
+        _gloss(ctx, x + r * 0.02, y - r * 0.14, r * 0.15, r * 0.10, -0.6, 0.4);
+        break;
+
+      case 'melone':
+        ctx.beginPath();
+        ctx.moveTo(x - r, y + r * 0.46);
+        ctx.arc(x, y + r * 0.46, r, Math.PI, 0);
+        ctx.closePath();
+        _shape(ctx, '#6fbf5a', lw);
+        ctx.beginPath();
+        ctx.moveTo(x - r * 0.80, y + r * 0.44);
+        ctx.arc(x, y + r * 0.44, r * 0.80, Math.PI, 0);
+        ctx.closePath();
+        ctx.fillStyle = '#fff0c6'; ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(x - r * 0.68, y + r * 0.42);
+        ctx.arc(x, y + r * 0.42, r * 0.68, Math.PI, 0);
+        ctx.closePath();
+        ctx.fillStyle = '#ff9f43'; ctx.fill();
+        ctx.fillStyle = '#5b3a16';
+        _ell(ctx, x - r * 0.30, y + r * 0.10, r * 0.09, r * 0.13, 0.2); ctx.fill();
+        _ell(ctx, x + r * 0.04, y - r * 0.06, r * 0.09, r * 0.13, -0.1); ctx.fill();
+        _ell(ctx, x + r * 0.36, y + r * 0.12, r * 0.09, r * 0.13, 0.3); ctx.fill();
+        break;
+
+      case 'mela':
+        ctx.beginPath();
+        _ep(ctx, x - r * 0.30, y + r * 0.06, r * 0.66, r * 0.74, -0.08);
+        _ep(ctx, x + r * 0.30, y + r * 0.06, r * 0.66, r * 0.74, 0.08);
+        _shape(ctx, C.berry || '#e8536b', lw);
+        ctx.strokeStyle = C.barkDark || '#4e2f18'; ctx.lineWidth = lw * 1.1; ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(x, y - r * 0.58); ctx.quadraticCurveTo(x + r * 0.10, y - r * 0.92, x + r * 0.02, y - r * 1.06);
+        ctx.stroke();
+        _ell(ctx, x + r * 0.38, y - r * 0.86, r * 0.34, r * 0.18, -0.42);
+        _shape(ctx, C.leafLight || '#63c777', lw * 0.8);
+        _gloss(ctx, x - r * 0.34, y - r * 0.30, r * 0.24, r * 0.14, -0.6, 0.5);
+        break;
+
+      case 'cocco':
+        ctx.beginPath(); _cp(ctx, x, y, r * 0.92);
+        _shape(ctx, '#8a5a30', lw);
+        ctx.strokeStyle = _rgba('#4e2f18', 0.45); ctx.lineWidth = lw * 0.7;
+        ctx.beginPath();
+        ctx.moveTo(x - r * 0.55, y - r * 0.42); ctx.quadraticCurveTo(x - r * 0.10, y, x - r * 0.48, y + r * 0.48);
+        ctx.moveTo(x + r * 0.10, y - r * 0.70); ctx.quadraticCurveTo(x + r * 0.34, y, x + r * 0.06, y + r * 0.68);
+        ctx.stroke();
+        ctx.fillStyle = '#4a2c14';
+        _cp2(ctx, x - r * 0.26, y - r * 0.20, r * 0.13);
+        _cp2(ctx, x + r * 0.20, y - r * 0.26, r * 0.13);
+        _cp2(ctx, x - r * 0.02, y + r * 0.14, r * 0.13);
+        _gloss(ctx, x - r * 0.36, y - r * 0.48, r * 0.26, r * 0.13, -0.6, 0.30);
+        break;
+
+      default: /* fragola */
+        ctx.beginPath();
+        ctx.moveTo(x, y + r * 0.98);
+        ctx.quadraticCurveTo(x - r * 0.92, y + r * 0.10, x - r * 0.58, y - r * 0.46);
+        ctx.quadraticCurveTo(x, y - r * 0.86, x + r * 0.58, y - r * 0.46);
+        ctx.quadraticCurveTo(x + r * 0.92, y + r * 0.10, x, y + r * 0.98);
+        ctx.closePath();
+        _shape(ctx, C.berry || '#e8536b', lw);
+        ctx.fillStyle = '#ffe9a8';
+        var si, sj, sx2, sy2;
+        for (si = 0; si < 3; si++) {
+          for (sj = 0; sj < 2 + (si < 2 ? 1 : 0); sj++) {
+            sx2 = x + (sj - (si < 2 ? 1 : 0.5)) * r * 0.40 + (si % 2) * r * 0.10;
+            sy2 = y - r * 0.24 + si * r * 0.40;
+            _ell(ctx, sx2, sy2, r * 0.08, r * 0.12, 0.2); ctx.fill();
+          }
+        }
+        ctx.beginPath();
+        for (si = 0; si < 5; si++) {
+          var aa = -Math.PI / 2 + (si - 2) * 0.52;
+          ctx.moveTo(x, y - r * 0.44);
+          ctx.lineTo(x + Math.cos(aa) * r * 0.76, y - r * 0.44 + Math.sin(aa) * r * 0.48);
+          ctx.lineTo(x + Math.cos(aa + 0.26) * r * 0.30, y - r * 0.40 + Math.sin(aa + 0.26) * r * 0.20);
+          ctx.closePath();
+        }
+        _shape(ctx, C.leaf || '#2f8f4e', lw * 0.75);
+        _gloss(ctx, x - r * 0.28, y + r * 0.06, r * 0.20, r * 0.12, -0.5, 0.45);
+        break;
+    }
+    ctx.restore();
+  };
+  function _cp2(c, x, y, r) { c.beginPath(); _cp(c, x, y, r); c.fill(); }
+
+  /* ==================================================================== EGG */
+  /* (x,y) = centre, s = height. o.crack 0..1 — at 1 the shell is split in two. */
+  A.egg = function (ctx, x, y, s, o) {
+    o = o || {};
+    s = s > 0 ? s : 120;
+    var crack = _clamp(o.crack || 0, 0, 1);
+    var col = o.color || '#fff3d6';
+    var lw = _lw(s * 0.9);
+    var rx = s * 0.355, ry = s * 0.50;
+    var i, zx, zy;
+    var cy = -ry * 0.06;                     // crack line, in egg-local coords
+    var split = crack > 0.62 ? (crack - 0.62) / 0.38 : 0;
+    var gap = split * s * 0.17;
+
+    function eggPath(c) {
+      c.beginPath();
+      c.moveTo(0, -ry);
+      c.bezierCurveTo(rx * 0.82, -ry * 0.88, rx * 1.06, ry * 0.28, 0, ry);
+      c.bezierCurveTo(-rx * 1.06, ry * 0.28, -rx * 0.82, -ry * 0.88, 0, -ry);
+      c.closePath();
+    }
+    function speckles(c) {
+      c.fillStyle = _rgba(_shade(col, -60), 0.30);
+      for (i = 0; i < 7; i++) {
+        c.beginPath();
+        c.ellipse(_rnd(i * 3 + 1) * rx * 1.3 - rx * 0.65, _rnd(i * 3 + 2) * ry * 1.5 - ry * 0.75,
+          s * 0.030 * (0.6 + _rnd(i * 3 + 3)), s * 0.024 * (0.6 + _rnd(i * 3 + 3)), 0, 0, TAU);
+        c.fill();
+      }
+    }
+    // zigzag used both as the visible crack and as the split boundary
+    function zig(c, from) {
+      var n = 9, px, py;
+      for (i = 0; i <= n; i++) {
+        px = -rx * 1.25 + (i / n) * rx * 2.5;
+        py = cy + (i % 2 ? -ry * 0.11 : ry * 0.05);
+        if (i === 0 && from) c.moveTo(px, py); else c.lineTo(px, py);
+      }
+    }
+
+    ctx.save();
+    ctx.translate(x, y);
+    // ground contact shadow
+    ctx.globalAlpha = 0.18;
+    _ell(ctx, 0, ry * 0.92, rx * 0.86, ry * 0.14, 0);
+    ctx.fillStyle = '#1b2a10'; ctx.fill();
+    ctx.globalAlpha = 1;
+
+    if (split <= 0) {
+      eggPath(ctx); _shape(ctx, col, lw);
+      speckles(ctx);
+      _gloss(ctx, -rx * 0.36, -ry * 0.40, rx * 0.24, ry * 0.16, -0.5, 0.55);
+      if (crack > 0.02) {
+        var shown = _clamp(crack / 0.60, 0, 1);
+        ctx.save();
+        ctx.beginPath(); ctx.rect(-rx * 1.3, cy - ry * 0.4, rx * 2.6 * shown, ry * 0.8); ctx.clip();
+        ctx.strokeStyle = INK; ctx.lineWidth = lw * 1.1; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        ctx.beginPath(); zig(ctx, true); ctx.stroke();
+        ctx.restore();
+      }
+    } else {
+      // bottom bowl
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(-rx * 1.4, ry * 1.6); ctx.lineTo(-rx * 1.4, cy + ry * 0.05); zig(ctx, false);
+      ctx.lineTo(rx * 1.4, ry * 1.6); ctx.closePath();
+      ctx.clip();
+      eggPath(ctx); _shape(ctx, col, lw); speckles(ctx);
+      ctx.restore();
+      ctx.strokeStyle = INK; ctx.lineWidth = lw * 1.2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.beginPath(); zig(ctx, true); ctx.stroke();
+      // lifted top half
+      ctx.save();
+      ctx.translate(gap * 0.35, -gap); ctx.rotate(-split * 0.22);
+      ctx.beginPath();
+      ctx.moveTo(-rx * 1.4, -ry * 1.6); ctx.lineTo(-rx * 1.4, cy + ry * 0.05); zig(ctx, false);
+      ctx.lineTo(rx * 1.4, -ry * 1.6); ctx.closePath();
+      ctx.clip();
+      eggPath(ctx); _shape(ctx, col, lw); speckles(ctx);
+      _gloss(ctx, -rx * 0.36, -ry * 0.42, rx * 0.24, ry * 0.16, -0.5, 0.55);
+      ctx.restore();
+    }
+    ctx.restore();
+  };
+
+  /* ================================================================== CHICK */
+  /* Newborn dino. (x,y) = centre (per contract), s = height. */
+  A.chick = function (ctx, x, y, s, o) {
+    o = o || {};
+    s = s > 0 ? s : 80;
+    var t = (o.t === undefined || o.t === null) ? (G.t || 0) : o.t;
+    var col = o.color || C.dino || '#57c98a';
+    var dk = _shade(col, -46);
+    var lw = _lw(s * 1.4), u = s, i;
+    var wob = Math.sin(t * 2.4) * 0.05;
+    var brt = Math.sin(t * 3.1) * 0.012;
+    var feet = y + u * 0.48;
+    var byy = y + u * 0.12, brx = u * 0.335, bry = u * (0.315 + brt);
+    var hy = y - u * 0.20, hr = u * 0.30;
+    var blink = 1, bt = t % 3.1;
+    if (bt < 0.15) blink = _clamp(Math.abs(bt - 0.075) / 0.075, 0.05, 1);
+
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    _ell(ctx, x, feet + u * 0.03, u * 0.30, u * 0.06, 0);
+    ctx.fillStyle = '#1b2a10'; ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.translate(x, feet); ctx.rotate(wob * 0.12); ctx.translate(-x, -feet);
+
+    // tiny tail
+    ctx.beginPath();
+    ctx.moveTo(x - brx * 0.60, byy - u * 0.04);
+    ctx.quadraticCurveTo(x - brx * 1.70, byy - u * 0.16 + wob * u * 0.10, x - brx * 1.52, byy + u * 0.10);
+    ctx.quadraticCurveTo(x - brx * 1.10, byy + u * 0.12, x - brx * 0.62, byy + u * 0.10);
+    ctx.closePath();
+    _shape(ctx, col, lw * 0.9);
+    // crest
+    ctx.beginPath();
+    for (i = 0; i < 3; i++) {
+      var ca = -2.42 + i * 0.30, cx0 = x + hr * 0.98 * Math.cos(ca), cy0 = hy + hr * 0.98 * Math.sin(ca);
+      ctx.moveTo(cx0 - u * 0.045, cy0 + u * 0.020);
+      ctx.lineTo(x + hr * 1.34 * Math.cos(ca - 0.06), hy + hr * 1.36 * Math.sin(ca - 0.06));
+      ctx.lineTo(cx0 + u * 0.035, cy0 + u * 0.045);
+      ctx.closePath();
+    }
+    _shape(ctx, _shade(col, -20), lw * 0.8);
+    // legs
+    _limb(ctx, x - u * 0.09, byy + bry * 0.72, x - u * 0.11, feet - u * 0.02, u * 0.075, dk, lw * 0.8);
+    _limb(ctx, x + u * 0.09, byy + bry * 0.72, x + u * 0.12, feet - u * 0.02, u * 0.080, col, lw * 0.8);
+    ctx.beginPath();
+    _ep(ctx, x - u * 0.105, feet - u * 0.015, u * 0.085, u * 0.045, 0);
+    _ep(ctx, x + u * 0.125, feet - u * 0.015, u * 0.088, u * 0.047, 0);
+    _shape(ctx, _shade(col, -10), lw * 0.8);
+    // body + head, one blob
+    ctx.beginPath();
+    _ep(ctx, x, byy, brx, bry, 0);
+    _ep(ctx, x, hy, hr, hr * 0.96, 0);
+    _shape(ctx, col, lw);
+    // belly
+    ctx.globalAlpha = 0.95;
+    _ell(ctx, x, byy + u * 0.055, brx * 0.62, bry * 0.66, 0);
+    ctx.fillStyle = C.dinoBelly || '#f6e7c1'; ctx.fill();
+    ctx.globalAlpha = 1;
+    // stubby arms
+    _limb(ctx, x - brx * 0.72, byy - u * 0.05, x - brx * 1.02, byy + u * 0.06 + wob * u * 0.03, u * 0.062, col, lw * 0.8);
+    _limb(ctx, x + brx * 0.72, byy - u * 0.05, x + brx * 1.02, byy + u * 0.06 - wob * u * 0.03, u * 0.062, col, lw * 0.8);
+    // face
+    ctx.globalAlpha = 0.34;
+    ctx.fillStyle = C.pinkPop || '#ff6fae';
+    _ell(ctx, x - hr * 0.66, hy + hr * 0.34, hr * 0.22, hr * 0.14, 0); ctx.fill();
+    _ell(ctx, x + hr * 0.66, hy + hr * 0.34, hr * 0.22, hr * 0.14, 0); ctx.fill();
+    ctx.globalAlpha = 1;
+    _eye(ctx, x - hr * 0.36, hy - hr * 0.06, hr * 0.30, 'open', blink, 0.25, lw * 0.9, 0);
+    _eye(ctx, x + hr * 0.36, hy - hr * 0.06, hr * 0.30, 'open', blink, 0.25, lw * 0.9, 0);
+    // little beaky smile
+    ctx.strokeStyle = INK; ctx.lineWidth = lw * 0.95; ctx.lineCap = 'round';
+    ctx.beginPath(); _smile(ctx, x, hy + hr * 0.50, hr * 0.24, 0.5); ctx.stroke();
+    // eggshell cap — freshly hatched
+    ctx.beginPath();
+    ctx.moveTo(x - hr * 0.86, hy - hr * 0.52);
+    ctx.quadraticCurveTo(x, hy - hr * 1.62, x + hr * 0.86, hy - hr * 0.52);
+    ctx.lineTo(x + hr * 0.60, hy - hr * 0.66);
+    ctx.lineTo(x + hr * 0.30, hy - hr * 0.48);
+    ctx.lineTo(x, hy - hr * 0.68);
+    ctx.lineTo(x - hr * 0.32, hy - hr * 0.48);
+    ctx.lineTo(x - hr * 0.62, hy - hr * 0.66);
+    ctx.closePath();
+    _shape(ctx, '#fff3d6', lw * 0.9);
+    ctx.restore();
+  };
+
+  /* =================================================================== STAR */
+  A.star = function (ctx, x, y, r, color) {
+    r = r > 0 ? r : 20;
+    ctx.save();
+    _starPath(ctx, x, y, r, 0.46);
+    _shape(ctx, color || C.sun || '#ffd75e', _clamp(r * 0.15, 1.6, 4));
+    _gloss(ctx, x - r * 0.26, y - r * 0.34, r * 0.20, r * 0.11, -0.6, 0.5);
+    ctx.restore();
+  };
+
+  /* ================================================================= SHAPES */
+  /* Filled silhouettes for the matching minigame: colour-blind children must be
+     able to pair them by form alone. Every one is (ctx, x, y, r, color). */
+  function _mk(fn) {
+    return function (ctx, x, y, r, color) {
+      r = r > 0 ? r : 30;
+      ctx.save();
+      fn(ctx, x, y, r);
+      _shape(ctx, color || C.berry || '#e8536b', _clamp(r * 0.16, 2, 5));
+      _gloss(ctx, x - r * 0.30, y - r * 0.42, r * 0.26, r * 0.13, -0.55, 0.34);
+      ctx.restore();
+    };
+  }
+  A.SHAPES = {
+    cerchio: _mk(function (c, x, y, r) { _circ(c, x, y, r); }),
+    quadrato: _mk(function (c, x, y, r) {
+      var d = r * 0.86;
+      if (G.roundRect) G.roundRect(c, x - d, y - d, d * 2, d * 2, r * 0.26);
+      else { c.beginPath(); c.rect(x - d, y - d, d * 2, d * 2); }
+    }),
+    triangolo: _mk(function (c, x, y, r) {
+      c.beginPath();
+      c.moveTo(x, y - r * 1.02);
+      c.lineTo(x + r * 0.94, y + r * 0.68);
+      c.lineTo(x - r * 0.94, y + r * 0.68);
+      c.closePath();
+    }),
+    cuore: _mk(function (c, x, y, r) {
+      c.beginPath();
+      c.moveTo(x, y + r * 0.92);
+      c.bezierCurveTo(x - r * 1.42, y - r * 0.18, x - r * 0.68, y - r * 1.18, x, y - r * 0.42);
+      c.bezierCurveTo(x + r * 0.68, y - r * 1.18, x + r * 1.42, y - r * 0.18, x, y + r * 0.92);
+      c.closePath();
+    }),
+    stella: _mk(function (c, x, y, r) { _starPath(c, x, y, r, 0.46); }),
+    fiore: _mk(function (c, x, y, r) {
+      var i, a;
+      c.beginPath();
+      for (i = 0; i < 6; i++) {
+        a = i * TAU / 6;
+        _ep(c, x + Math.cos(a) * r * 0.56, y + Math.sin(a) * r * 0.56, r * 0.46, r * 0.36, a);
+      }
+      _cp(c, x, y, r * 0.40);
+    }),
+    luna: _mk(function (c, x, y, r) {
+      var a = 0.62, dx = r * 0.55;
+      var px = r * Math.cos(a) - dx, py = r * Math.sin(a);
+      var r2 = Math.sqrt(px * px + py * py), ang = Math.atan2(py, px);
+      c.beginPath();
+      c.arc(x, y, r, a, -a, false);
+      c.arc(x + dx, y, r2, -ang, ang, true);
+      c.closePath();
+    }),
+    rombo: _mk(function (c, x, y, r) {
+      c.beginPath();
+      c.moveTo(x, y - r * 1.04);
+      c.lineTo(x + r * 0.76, y);
+      c.lineTo(x, y + r * 1.04);
+      c.lineTo(x - r * 0.76, y);
+      c.closePath();
+    })
+  };
+
+  A._ok = true;
+})();
+
+
 /* ==================== 03-profili.js ==================== */
 /* Chi dirige la stazione: profili, segreto a figure, colore della locomotiva.
 
@@ -1615,7 +2396,7 @@ var A = window.A = window.A || {};
     var plan = LEVELS[level - 1];
     var n = plan.tracks, total = plan.total;
     S = {
-      level: level, tracks: n, total: total, schedule: [], next: 0,
+      level: level, tracks: n, total: total, schedule: [], next: 0, switchA: 0, switchB: 0,
       active: [], focus: null, occupied: [null, null, null], departing: [],
       arrived: 0, departed: 0, mistakes: 0, waits: 0, collisions: 0, hint: -1, idle: 0,
       message: 'Tocca il trenino', fine: false, reward: false, plan: plan
@@ -1624,7 +2405,7 @@ var A = window.A = window.A || {};
     for (var i = 0; i < total; i++) {
       var target = G.rndi(0, n - 1);
       if (n > 1 && target === last && i % 2) target = (target + 1) % n;
-      S.schedule.push({ target: target, dir: plan.both && i % 2 ? -1 : 1, id: i });
+      S.schedule.push({ target: target, dir: 1, id: i });
       last = target;
     }
     spawn();
@@ -1633,10 +2414,11 @@ var A = window.A = window.A || {};
   function spawn() {
     if (S.next >= S.schedule.length || S.fine || S.active.length >= S.plan.maxIncoming) return;
     if (S.plan.maxIncoming === 1 && S.occupied.some(function (v) { return !!v; })) return;
-    var q = S.schedule[S.next++], lane = S.active.length;
+    var q = S.schedule[S.next++], lane = 0;
+    while(S.active.some(function(t){return t.lane===lane;})) lane++;
     S.active.push({
       target: q.target, dir: q.dir, id: q.id, phase: 'choose', p: 0,
-      x: q.dir === 1 ? 118 : W - 118, y: 210 + lane * 48, sourceY: 210 + lane * 48, lane: lane,
+      x: q.dir === 1 ? 118 : W - 118, y: 238 + lane * 148, sourceY: 238 + lane * 148, lane: lane,
       color: TRACK_COL[q.target]
     });
     S.message = S.active.length > 1 ? 'Scegli un trenino da preparare' : 'Tocca il trenino per guardare dove va';
@@ -1658,12 +2440,12 @@ var A = window.A = window.A || {};
   }
 
   function trackFreeFor(t) {
-    if (S.occupied[t.target]) return false;
+    if (S.occupied[t.target] || S.departing.some(function(d){return d.target===t.target;})) return false;
     for (var i = 0; i < S.active.length; i++) {
       var other = S.active[i];
       /* L'incrocio e' una risorsa unica: un solo convoglio lo attraversa,
          gli altri restano visibili in attesa del loro verde. */
-      if (S.plan.cross && other !== t && other.phase === 'moving') return false;
+      if (other !== t && other.phase === 'moving') return false;
       if (other !== t && other.target === t.target &&
           (other.phase === 'moving' || (other.phase === 'waiting' && other.id < t.id))) return false;
     }
@@ -1703,17 +2485,18 @@ var A = window.A = window.A || {};
     S.idle = 0;
     if (S.active.indexOf(t) >= 0) {
       if (t.phase === 'choose') {
-        t.phase = 'choose-route'; S.focus = t.id; S.hint = t.target;
-        S.message = 'Guarda il simbolo e scegli il binario'; G.sfx('tap');
-        if (S.level === 1) G.say(TRACK_NAME[t.target] + '. Tocca quel simbolo.');
+        t.phase = 'choose-route'; S.focus = t.id; S.hint = -1;
+        S.message = 'Prepara gli scambi, poi dai il via'; G.sfx('tap');
+        G.say('Destinazione ' + TRACK_NAME[t.target] + '. Prepara gli scambi e tocca via.');
         return true;
       }
       if (t.phase === 'choose-route') {
-        S.focus = t.id; S.message = 'Ora tocca il simbolo uguale'; S.hint = t.target;
+        S.focus = t.id; S.message = 'Segui il binario illuminato. Dove arriverà?'; S.hint = -1;
         return true;
       }
       if (t.phase === 'waiting') {
-        S.message = 'Aspetta: passa prima chi ha il binario libero'; G.sfx('tap');
+        if(trackFreeFor(t)){startMoving(t);return true;}
+        S.message = 'Libera prima il binario: fai partire il treno fermo'; G.say(S.message);
         return true;
       }
       return false;
@@ -1735,7 +2518,7 @@ var A = window.A = window.A || {};
     S.departing.push(t); S.departed++; S.message = 'Via libera! Buon viaggio!';
     G.sfx('win'); G.fx.confetti(1080, TRACK_Y[track], TRACK_COL[track], 12);
     for (var i = 0; i < S.active.length; i++) {
-      if (S.active[i].phase === 'waiting' && trackFreeFor(S.active[i])) startMoving(S.active[i]);
+      if (S.active[i].phase === 'waiting') S.message = 'Ora guarda il segnale e dai il via al treno in attesa';
     }
     fillIncoming();
     checkDone();
@@ -1743,7 +2526,7 @@ var A = window.A = window.A || {};
   }
 
   function checkDone() {
-    if (S.departed < S.total || S.active.length || S.occupied.some(function (v) { return !!v; })) return;
+    if (S.departed < S.total || S.departing.length || S.active.length || S.occupied.some(function (v) { return !!v; })) return;
     S.fine = true; S.message = 'Turno completato! Tutti i treni sono partiti';
     if (!S.reward) {
       S.reward = true;
@@ -1764,17 +2547,17 @@ var A = window.A = window.A || {};
   function updateTrains(dt) {
     S.active.forEach(function (a) {
       if (a.phase === 'choose' && S.idle > (S.level === 1 ? 2.6 : 4.5)) S.hint = -2;
-      if (a.phase === 'choose-route' && S.focus === a.id && S.idle > 2.2) S.hint = a.target;
-      if (a.phase === 'waiting' && trackFreeFor(a)) startMoving(a);
+      if (a.phase === 'choose-route' && S.focus === a.id && S.idle > (G.level===1?7:12)) S.hint = a.target;
+      if (a.phase === 'waiting' && trackFreeFor(a)) S.message = 'Via libera! Tocca il treno in attesa';
     });
     for (var ai = S.active.length - 1; ai >= 0; ai--) {
       var a = S.active[ai];
       if (a.phase !== 'moving') continue;
       a.p += dt / 1.15;
-      var e = G.easeInOut(a.p), sx = a.dir === 1 ? 118 : W - 118;
-      a.x = G.lerp(sx, 660, e); a.y = G.lerp(a.sourceY, TRACK_Y[a.target], e);
+      var point = routePoint(a.target, G.clamp(a.p,0,1), a.sourceY);
+      a.x = point.x; a.y = point.y;
       if (a.p >= 1) {
-        a.x = 660; a.y = TRACK_Y[a.target]; a.phase = 'parked'; a.dwell = S.level === 1 ? .45 : .8; a.ready = false;
+        a.x = 820; a.y = TRACK_Y[a.target]; a.phase = 'parked'; a.dwell = S.level === 1 ? .45 : .8; a.ready = false;
         S.occupied[a.target] = a; S.active.splice(ai, 1); S.arrived++;
         if (S.focus === a.id) S.focus = null;
         S.message = 'Aspettiamo i passeggeri...';
@@ -1790,41 +2573,47 @@ var A = window.A = window.A || {};
     });
     for (var i = S.departing.length - 1; i >= 0; i--) {
       var d = S.departing[i]; d.p += dt / 1.05;
-      d.x = G.lerp(660, d.dir === 1 ? W + 180 : -180, G.easeIn(d.p));
+      d.x = G.lerp(820, d.dir === 1 ? W + 180 : -180, G.easeIn(d.p));
       if (d.p >= 1) S.departing.splice(i, 1);
     }
     fillIncoming();
     checkDone();
   }
 
+  function selectedRoute(){return S.tracks===1?0:(S.switchA===0?0:(S.tracks===2?1:1+S.switchB));}
+  function launch(){return choose(selectedRoute());}
+  function toggleSwitch(which){
+    if(S.fine || S.active.some(function(t){return t.phase==='moving';}))return;
+    if(which===0)S.switchA=1-S.switchA;else S.switchB=1-S.switchB;
+    S.idle=0;S.hint=-1;G.sfx('tap');
+  }
+  // Every moving train follows the very same geometry as the visible rails.
+  function routePoint(target,p,sourceY){
+    var x,y,t;
+    if(p<.32){t=p/.32;x=G.lerp(118,330,t);y=G.lerp(sourceY,312,G.easeInOut(t));}
+    else if(p<.65){t=(p-.32)/.33;x=G.lerp(330,530,t);y=G.lerp(312,target===0?312:454,G.easeInOut(t));}
+    else{t=(p-.65)/.35;x=G.lerp(530,820,t);y=G.lerp(target===0?312:454,TRACK_Y[target],G.easeInOut(t));}
+    return{x:x,y:y};
+  }
+  function railPath(c,target,sourceY){
+    c.beginPath();for(var j=0;j<=40;j++){var q=routePoint(target,j/40,sourceY);if(j)c.lineTo(q.x,q.y);else c.moveTo(q.x,q.y);}c.lineTo(1280,TRACK_Y[target]);
+  }
   function rails(c) {
-    c.fillStyle = '#d4bf95'; c.fillRect(0, 202, W, H - 202);
-    if (S.plan.cross) {
-      c.save();
-      c.strokeStyle = '#62594e'; c.lineWidth = 8;
-      c.beginPath(); c.moveTo(360, 255); c.lineTo(850, 545); c.stroke();
-      c.beginPath(); c.moveTo(360, 545); c.lineTo(850, 255); c.stroke();
-      c.strokeStyle = '#8b765b'; c.lineWidth = 5;
-      for (var crossX = 430; crossX < 825; crossX += 58) {
-        var crossY = 255 + (crossX - 360) * 290 / 490;
-        c.beginPath(); c.moveTo(crossX - 12, crossY + 12); c.lineTo(crossX + 12, crossY - 12); c.stroke();
-      }
-      c.fillStyle = 'rgba(255,246,224,.94)'; G.roundRect(c, 830, 650, 390, 44, 18); c.fill();
-      G.text('INCROCIO: passa chi ha il verde', 1025, 672, { ctx: c, size: 18, color: C.ink });
-      c.restore();
+    c.fillStyle='#aac690';c.fillRect(0,218,W,H-218);
+    c.fillStyle='#7baf82';for(var bush=0;bush<9;bush++){c.beginPath();c.ellipse(245+bush*128,680,48,24,0,0,7);c.fill();}
+    for(var i=0;i<S.tracks;i++){
+      c.lineCap='round';railPath(c,i,238);c.strokeStyle='#b4a185';c.lineWidth=34;c.stroke();
+      railPath(c,i,238);c.strokeStyle='#5a615d';c.lineWidth=20;c.stroke();
+      railPath(c,i,238);c.strokeStyle='#e0d6bd';c.lineWidth=12;c.stroke();
+      c.fillStyle='#f7ebd1';G.roundRect(c,738,TRACK_Y[i]-51,300,86,20);c.fill();
+      c.fillStyle='#aa8663';c.fillRect(750,TRACK_Y[i]+33,275,8);
+      A.destination(c,982,TRACK_Y[i]-16,27,i);
     }
-    for (var i = 0; i < S.tracks; i++) {
-      var y = TRACK_Y[i];
-      c.fillStyle = 'rgba(255,255,255,.44)'; G.roundRect(c, 172, y - 53, 835, 106, 20); c.fill();
-      c.strokeStyle = '#62594e'; c.lineWidth = 8;
-      c.beginPath(); c.moveTo(0, 220); c.bezierCurveTo(210, 220, 220, y, 405, y); c.lineTo(W, y); c.stroke();
-      c.beginPath(); c.moveTo(0, 238); c.bezierCurveTo(210, 238, 220, y + 18, 405, y + 18); c.lineTo(W, y + 18); c.stroke();
-      c.strokeStyle = '#8b765b'; c.lineWidth = 5;
-      for (var x = 220; x < W; x += 52) { c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x, y + 27); c.stroke(); }
-      c.fillStyle = TRACK_COL[i]; G.roundRect(c, 246, y - 45, 150, 54, 17); c.fill();
-      A.destination(c, 275, y - 18, 21, i);
-      G.text('Binario ' + (i + 1), 300, y - 18, { ctx: c, size: 20, align: 'left', color: C.ink });
-    }
+    var selected=selectedRoute();
+    c.save();railPath(c,selected,238);c.strokeStyle='#ffdc78';c.lineWidth=6;c.stroke();c.restore();
+    // Waiting sidings reconnect to the first switch, never float over scenery.
+    S.active.forEach(function(t){if(t.lane){railPath(c,selected,t.sourceY);c.strokeStyle='#687269';c.lineWidth=4;c.stroke();}});
+    G.text('1',330,282,{size:22,color:C.ink});if(S.tracks>2)G.text('2',530,425,{size:22,color:C.ink});
   }
 
   function draw(c) {
@@ -1834,21 +2623,17 @@ var A = window.A = window.A || {};
     c.fillStyle = 'rgba(255,246,224,.94)'; G.roundRect(c, 310, 154, 660, 62, 24); c.fill();
     G.text(S.message, 640, 185, { ctx: c, size: 25, color: C.ink, maxWidth: 620 });
 
-    var routing = !!focusedTrain();
-    for (var i = 0; i < S.tracks; i++) (function (idx) {
-      var pulse = routing && S.hint === idx ? 1 + Math.sin(G.t * 7) * .08 : 1;
-      G.ui.round({
-        id: 'route-' + idx, x: 105, y: TRACK_Y[idx], r: 46 * pulse, color: TRACK_COL[idx], disabled: !routing,
-        icon: function (cc, x, y) { A.destination(cc, x, y, 25, idx); },
-        onTap: function () { choose(idx); }
-      });
-      var occ = S.occupied[idx];
-      A.signal(c, 1085, TRACK_Y[idx] - 18, 34, !!(occ && occ.ready));
-    })(i);
-
+    var routing=!!focusedTrain(), locked=S.active.some(function(t){return t.phase==='moving';});
+    function lever(which,x,y,value){c.strokeStyle='#647364';c.lineWidth=3;c.setLineDash([5,7]);c.beginPath();c.moveTo(x,y-48);c.lineTo(x,which===0?326:468);c.stroke();c.setLineDash([]);G.ui.button({id:'switch-'+which,x:x-52,y:y-48,w:104,h:96,r:26,color:locked?'#a4ada2':C.cream,disabled:locked,
+      icon:function(cc,cx,cy){cc.strokeStyle=C.ink;cc.lineWidth=7;cc.lineCap='round';cc.beginPath();cc.moveTo(cx,cy+20);cc.lineTo(cx+(value?24:-24),cy-22);cc.stroke();cc.fillStyle=C.tangerine;cc.beginPath();cc.arc(cx+(value?24:-24),cy-22,14,0,7);cc.fill();},
+      onTap:function(){toggleSwitch(which);}});}
+    if(S.tracks>1)lever(0,330,410,S.switchA);
+    if(S.tracks>2)lever(1,530,563,S.switchB);
+    G.ui.button({id:'station-go',x:1060,y:112,w:180,h:104,r:28,color:C.leaf,label:'VIA',disabled:!routing,onTap:launch});
+    for(var sig=0;sig<S.tracks;sig++)A.signal(c,1120,TRACK_Y[sig]-20,30,!!(S.occupied[sig]&&S.occupied[sig].ready));
     S.occupied.forEach(function (t, idx) {
       if (!t) return;
-      A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir });
+      A.train(c, t.x, t.y, 100, { color: t.color, kind: t.target, dir: t.dir });
       G.ui.button({ id: 'parked-' + idx, x: t.x - 92, y: t.y - 86, w: 184, h: 148, r: 54, ghost: true,
         onTap: function () { tapTrain(t, idx); } });
       if (t.ready) {
@@ -1856,9 +2641,9 @@ var A = window.A = window.A || {};
         c.beginPath(); c.arc(t.x, t.y - 12, 92, 0, 7); c.stroke(); c.restore();
       }
     });
-    S.departing.forEach(function (t) { A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir }); });
+    S.departing.forEach(function (t) { A.train(c, t.x, t.y, 100, { color: t.color, kind: t.target, dir: t.dir }); });
     S.active.forEach(function (t) {
-      A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir });
+      A.train(c, t.x, t.y, 100, { color: t.color, kind: t.target, dir: t.dir });
       G.ui.button({ id: 'active-train-' + t.id, x: t.x - 92, y: t.y - 86, w: 184, h: 148, r: 54, ghost: true,
         onTap: function () { tapTrain(t); } });
       if (t.phase === 'choose') {
@@ -1871,11 +2656,6 @@ var A = window.A = window.A || {};
       }
     });
 
-    if (S.plan.both && S.next < S.schedule.length) {
-      c.fillStyle = 'rgba(255,246,224,.92)'; G.roundRect(c, W - 205, 112, 165, 92, 22); c.fill();
-      G.text('Prossimo', W - 122, 136, { ctx: c, size: 18, color: C.ink });
-      A.destination(c, W - 122, 173, 26, S.schedule[S.next].target);
-    }
     if (S.fine) {
       c.fillStyle = 'rgba(31,55,42,.80)'; c.fillRect(0, 0, W, H);
       c.fillStyle = C.cream; G.roundRect(c, 280, 130, 720, 460, 42); c.fill();
@@ -1894,7 +2674,7 @@ var A = window.A = window.A || {};
   G.stationState = function () {
     var focused = focusedTrain() || S.active[0];
     return {
-      level: S.level, tracks: S.tracks, total: S.total, next: S.next,
+      level: S.level, tracks: S.tracks, total: S.total, next: S.next, route: selectedRoute(), switches:[S.switchA,S.switchB],
       cross: !!S.plan.cross, maxIncoming: S.plan.maxIncoming,
       active: focused && { id: focused.id, target: focused.target, phase: focused.phase },
       actives: S.active.map(function (t) { return { id: t.id, target: t.target, phase: t.phase }; }),
@@ -1907,6 +2687,9 @@ var A = window.A = window.A || {};
     };
   };
   G.stationChoose = choose;
+  G.stationToggle = toggleSwitch;
+  G.stationLaunch = launch;
+  G.stationRoutePoint = routePoint;
   G.stationDepart = depart;
   G.stationTapTrain = function (id) {
     for (var a = 0; a < S.active.length; a++) {
@@ -1923,6 +2706,425 @@ var A = window.A = window.A || {};
     update: update,
     draw: draw
   });
+})();
+
+
+/* ==================== 92-family-account.js ==================== */
+/* Accounts: who is playing. Each child gets their own dino, their own save and
+   an optional 3-icon "secret" instead of a password — a 3-year-old cannot type
+   but can absolutely remember "cuore, stella, luna".
+   This is a family lock, not security: it keeps two siblings out of each
+   other's progress, nothing more. */
+(function () {
+  'use strict';
+
+  var C = G.C, W = G.W, H = G.H;
+
+  var COLORS = [C.dino, C.blueberry, C.pinkPop, C.tangerine, C.plum, C.water];
+
+  var SECRET_KEYS = [
+    { shape: 'cerchio', color: C.berry, name: 'cerchio rosso' },
+    { shape: 'quadrato', color: C.blueberry, name: 'quadrato blu' },
+    { shape: 'triangolo', color: C.mint, name: 'triangolo verde' },
+    { shape: 'cuore', color: C.pinkPop, name: 'cuore rosa' },
+    { shape: 'stella', color: C.sun, name: 'stella gialla' },
+    { shape: 'fiore', color: C.plum, name: 'fiore viola' },
+    { shape: 'luna', color: C.tangerine, name: 'luna arancione' },
+    { shape: 'rombo', color: C.water, name: 'rombo azzurro' },
+    { shape: 'quadrato', color: C.leafLight, name: 'quadrato verde' }
+  ];
+
+  function secretIcon(c, x, y, r, i) {
+    var k = SECRET_KEYS[i % SECRET_KEYS.length];
+    var f = window.A && A.SHAPES && A.SHAPES[k.shape];
+    if (f) { f(c, x, y, r, k.color); return; }
+    c.save(); c.fillStyle = k.color; c.strokeStyle = C.ink; c.lineWidth = 4;
+    c.beginPath(); c.arc(x, y, r, 0, 7); c.fill(); c.stroke(); c.restore();
+  }
+
+  /* `gear` is a look object from G.look (see 01c-art-gear.js). Pass one when
+     drawing SOMEBODY ELSE'S dino; pass nothing for the current player and
+     A.dino resolves the current save itself.
+     Every account gets its OWN buffer — this screen draws up to five dinos in
+     a single frame, and a shared one would put the last child's hat on all of
+     them. To a three-year-old that is not a glitch, that is a theft. */
+  function dinoPreview(c, x, y, s, color, gear, pose) {
+    if (window.A && A.dino) {
+      var o = { color: color, pose: pose || 'idle', t: G.t, facing: 1 };
+      if (gear) o.gear = gear;
+      A.dino(c, x, y, s, o);
+      return;
+    }
+    c.save(); c.fillStyle = color || C.dino;
+    c.beginPath(); c.ellipse(x, y - s * .3, s * .32, s * .3, 0, 0, 7); c.fill(); c.restore();
+  }
+
+  function backdrop(c, title) {
+    if (window.A && A.jungle) A.jungle(c, G.t, { dim: .35 });
+    else { c.fillStyle = C.leafDeep; c.fillRect(0, 0, W, H); c.fillStyle='#285e4d';c.beginPath();c.ellipse(250,720,700,220,0,0,7);c.fill();c.fillStyle='#36795b';c.beginPath();c.ellipse(1100,780,750,240,0,0,7);c.fill(); }
+    c.save();
+    c.fillStyle = 'rgba(10,32,20,.34)';
+    c.fillRect(0, 0, W, H);
+    c.restore();
+    if (title) G.text(title, W / 2, 78, { size: 60, color: C.cream, stroke: 'rgba(12,40,25,.75)', strokeWidth: 12 });
+    if (window.A && A.canopy) A.canopy(c, G.t);
+  }
+
+  /* ------------------------------------------------------- scene: accesso */
+  var accountPage = 0;
+  var lookCache = {};     // account id -> its OWN look buffer, read once per entry
+
+  G.scene('accesso', {
+    hud: false, back: false,
+    enter: function () {
+      lookCache = {};
+      G.accounts.list().forEach(function (a) {
+        lookCache[a.id] = {};
+      });
+      var n = G.accounts.list().length;
+      setTimeout(function () {
+        if (G.current !== 'accesso') return;
+        G.say(n ? 'Chi gioca oggi?' : 'Benvenuto! Facciamo il tuo dinosauro.');
+      }, 500);
+    },
+    draw: function (c) {
+      backdrop(c, 'Chi gioca?');
+      if (G.accounts.list().length > 4) {
+        G.ui.button({id:'profiles-prev',x:250,y:590,w:220,h:96,color:C.water,label:'←',disabled:accountPage===0,onTap:function(){accountPage--;}});
+        G.ui.button({id:'profiles-next',x:810,y:590,w:220,h:96,color:C.water,label:'→',disabled:(accountPage+1)*4>G.accounts.list().length,onTap:function(){accountPage++;}});
+      }
+
+      var list = G.accounts.list();
+      accountPage = Math.min(accountPage, Math.floor(list.length / 4));
+      var items = list.slice(accountPage * 4, accountPage * 4 + 4);
+      var n = items.length + 1;
+      var cw = 214, gap = 24;
+      var total = n * cw + (n - 1) * gap;
+      var x0 = (W - total) / 2, y = 186, ch = 348;
+
+      items.forEach(function (a, i) {
+        var x = x0 + i * (cw + gap);
+        var wob = Math.sin(G.t * 1.6 + i) * 4;
+        c.save();
+        if (window.A && A.panel) A.panel(c, x, y + wob, cw, ch, { r: 28 });
+        else { c.fillStyle = C.cream; G.roundRect(c, x, y + wob, cw, ch, 28); c.fill(); }
+        c.restore();
+        dinoPreview(c, x + cw / 2, y + wob + 236, 176, a.color, lookCache[a.id] || null);
+        G.text(a.name, x + cw / 2, y + wob + 282, { size: 34, color: C.ink, maxWidth: cw - 26 });
+        // age badge
+        c.save();
+        c.fillStyle = a.level === 2 ? C.blueberry : C.tangerine;
+        G.roundRect(c, x + cw / 2 - 62, y + wob + 300, 124, 34, 17); c.fill();
+        G.text(a.level === 2 ? 'Grande' : 'Piccolo', x + cw / 2, y + wob + 318, { size: 22, color: '#fff' });
+        c.restore();
+        if (a.secret && a.secret.length) {
+          c.save(); c.globalAlpha = .85;
+          secretIcon(c, x + cw - 30, y + wob + 30, 15, 4);
+          c.restore();
+        }
+        G.ui.button({
+          id: 'acct' + a.id, x: x, y: y + wob, w: cw, h: ch, r: 28, ghost: true,
+          onTap: function () {
+            if (a.secret && a.secret.length) G.go('segreto', { id: a.id });
+            else { (G.familyLogin || G.accounts.login)(a.id); G.go('menu'); }
+          }
+        });
+      });
+
+      // new player card
+      var xn = x0 + items.length * (cw + gap);
+      var wn = Math.sin(G.t * 1.6 + items.length) * 4;
+      G.ui.button({
+        id: 'nuovo', x: xn, y: y + wn, w: cw, h: ch, r: 28, color: C.leaf,
+        icon: function (cc, cx, cy, s) {
+          cc.save();
+          cc.strokeStyle = '#fff'; cc.lineWidth = 16; cc.lineCap = 'round';
+          cc.beginPath();
+          cc.moveTo(cx, cy - 96); cc.lineTo(cx, cy - 20);
+          cc.moveTo(cx - 38, cy - 58); cc.lineTo(cx + 38, cy - 58);
+          cc.stroke(); cc.restore();
+        },
+        onTap: function () { G.go('nuovo'); }
+      });
+      G.text('Nuovo', xn + cw / 2, y + wn + ch - 92, { size: 34, color: '#fff', stroke: 'rgba(0,0,0,.25)' });
+      G.text('giocatore', xn + cw / 2, y + wn + ch - 54, { size: 30, color: '#fff', stroke: 'rgba(0,0,0,.25)' });
+
+      // discreet parent door
+      G.ui.round({
+        id: 'gear-login', x: W - 56, y: H - 52, r: 30, color: 'rgba(255,246,224,.55)',
+        icon: function (cc, x, yy, r) {
+          cc.save(); cc.fillStyle = C.ink;
+          for (var i = 0; i < 8; i++) {
+            var a = i * Math.PI / 4 + G.t * .4;
+            cc.save(); cc.translate(x + Math.cos(a) * r * .5, yy + Math.sin(a) * r * .5); cc.rotate(a);
+            cc.fillRect(-3, -5, 10, 10); cc.restore();
+          }
+          cc.beginPath(); cc.arc(x, yy, r * .32, 0, 7); cc.fill();
+          cc.fillStyle = 'rgba(255,246,224,.9)'; cc.beginPath(); cc.arc(x, yy, r * .13, 0, 7); cc.fill();
+          cc.restore();
+        },
+        onTap: function () { G.go('gate', { then: 'genitori', back: 'accesso' }); }
+      });
+    }
+  });
+
+  /* ------------------------------------------------------- scene: segreto */
+  var sg = { id: null, taps: [], shake: 0, fails: 0, look: null };
+
+  G.scene('segreto', {
+    hud: false, back: false,
+    enter: function (p) {
+      sg.id = p && p.id; sg.taps = []; sg.shake = 0; sg.fails = 0;
+      sg.look = {};
+      var a = G.accounts.byId(sg.id);
+      setTimeout(function () {
+        if (G.current !== 'segreto') return;
+        G.say('Ciao ' + (a ? a.name : '') + '! Tocca il tuo segreto.');
+      }, 420);
+    },
+    update: function (dt) { if (sg.shake > 0) sg.shake = Math.max(0, sg.shake - dt * 4); },
+    draw: function (c) {
+      var a = G.accounts.byId(sg.id);
+      if (!a) { G.go('accesso'); return; }
+      backdrop(c, null);
+
+      dinoPreview(c, 250, 470, 250, a.color, sg.look, sg.shake > 0 ? 'think' : 'idle');
+      G.text('Ciao ' + a.name + '!', 250, 200, { size: 52, color: C.cream, stroke: 'rgba(12,40,25,.7)', strokeWidth: 10 });
+      G.text('Tocca il tuo segreto', 250, 258, { size: 30, color: C.cream, stroke: 'rgba(12,40,25,.7)', strokeWidth: 8, weight: 700 });
+
+      // progress slots
+      var i;
+      for (i = 0; i < 3; i++) {
+        var sx = 250 + (i - 1) * 76, sy = 316;
+        c.save();
+        c.fillStyle = 'rgba(255,246,224,.35)';
+        c.beginPath(); c.arc(sx, sy, 28, 0, 7); c.fill();
+        c.restore();
+        if (sg.taps[i] !== undefined) secretIcon(c, sx, sy, 22, sg.taps[i]);
+      }
+
+      // 3x3 pad
+      var px = 690, py = 148, cell = 150, gap = 14;
+      var jitter = sg.shake > 0 ? Math.sin(G.t * 50) * sg.shake * 10 : 0;
+      for (i = 0; i < 9; i++) {
+        var gx = px + (i % 3) * (cell + gap) + jitter;
+        var gy = py + Math.floor(i / 3) * (cell + gap);
+        (function (idx, bx, by) {
+          G.ui.button({
+            id: 'sk' + idx, x: bx, y: by, w: cell, h: cell, r: 26, color: C.cream,
+            icon: function (cc, cx, cy) { secretIcon(cc, cx, cy, cell * .3, idx); },
+            onTap: function () {
+              sg.taps.push(idx);
+              G.sfx('pop');
+              if (sg.taps.length === 3) {
+                var ok = a.secret && a.secret.length === 3 && a.secret.every(function (v, k) { return v === sg.taps[k]; });
+                if (ok) {
+                  G.sfx('good');
+                  (G.familyLogin || G.accounts.login)(a.id);
+                  G.go('menu');
+                } else {
+                  sg.fails++; sg.shake = 1; sg.taps = [];
+                  G.sfx('bad'); G.shake(6);
+                  G.say(G.pick(['Ops! Riprova.', 'Non e questo, riprova!', 'Ancora una volta.']));
+                }
+              }
+            }
+          });
+        })(i, gx, gy);
+      }
+
+      G.ui.button({
+        x: 40, y: H - 108, w: 250, h: 84, r: 24, color: C.bark, label: 'Indietro',
+        onTap: function () { G.go('accesso'); }
+      });
+      if (sg.fails >= 3) {
+        G.ui.button({
+          x: 320, y: H - 108, w: 320, h: 84, r: 24, color: C.tangerine, label: 'Chiedi a un grande',
+          fontSize: 28,
+          onTap: function () { G.go('gate', { then: '@login', arg: a.id, back: 'segreto', backArg: { id: a.id } }); }
+        });
+      }
+    }
+  });
+
+  /* --------------------------------------------------------- scene: nuovo */
+  var nu = { step: 0, name: '', color: COLORS[0], level: 1, secret: [] };
+
+  G.scene('nuovo', {
+    hud: false, back: false,
+    enter: function () {
+      nu = { step: 0, name: '', color: COLORS[0], level: 1, secret: [] };
+      G.prompt('Come ti chiami?', '', function (v) {
+        if (v === null || !v) { G.go('accesso'); return; }
+        nu.name = v.slice(0, 14);
+        nu.step = 1;
+        G.say('Ciao ' + nu.name + '! Di che colore e il tuo dino?');
+      });
+    },
+    draw: function (c) {
+      backdrop(c, null);
+      var titles = ['', 'Scegli il colore', 'Quanti anni hai?', 'Scegli il tuo segreto'];
+      G.text(titles[nu.step] || '', W / 2, 74, { size: 52, color: C.cream, stroke: 'rgba(12,40,25,.75)', strokeWidth: 11 });
+
+      if (nu.step === 1) {
+        dinoPreview(c, W / 2, 430, 240, nu.color);
+        G.text(nu.name, W / 2, 470, { size: 40, color: C.cream, stroke: 'rgba(12,40,25,.7)', strokeWidth: 9 });
+        var bw = 128, bg = 18, tot = COLORS.length * bw + (COLORS.length - 1) * bg, x0 = (W - tot) / 2;
+        COLORS.forEach(function (col, i) {
+          G.ui.button({
+            id: 'col' + i, x: x0 + i * (bw + bg), y: 150, w: bw, h: 116, r: 24, color: col,
+            icon: function (cc, cx, cy) {
+              if (nu.color === col) {
+                cc.save(); cc.strokeStyle = '#fff'; cc.lineWidth = 8; cc.lineCap = 'round'; cc.lineJoin = 'round';
+                cc.beginPath(); cc.moveTo(cx - 22, cy); cc.lineTo(cx - 6, cy + 18); cc.lineTo(cx + 24, cy - 18); cc.stroke(); cc.restore();
+              }
+            },
+            onTap: function () { nu.color = col; G.sfx('pop'); }
+          });
+        });
+        G.ui.button({ x: W / 2 - 190, y: H - 116, w: 380, h: 92, r: 26, color: C.leaf, label: 'Avanti', onTap: function () { nu.step = 2; G.say('Quanti anni hai?'); } });
+      }
+
+      if (nu.step === 2) {
+        [{ lv: 1, t: 'Piccolo', s: '3 - 4 anni', col: C.tangerine }, { lv: 2, t: 'Grande', s: '5 - 7 anni', col: C.blueberry }]
+          .forEach(function (o, i) {
+            var x = W / 2 - 340 + i * 360;
+            G.ui.button({
+              id: 'lv' + o.lv, x: x, y: 180, w: 320, h: 300, r: 30,
+              color: nu.level === o.lv ? o.col : G.shade(o.col, 40),
+              label: o.t, sub: o.s, fontSize: 52,
+              onTap: function () { nu.level = o.lv; G.sfx('pop'); }
+            });
+          });
+        G.text(nu.level === 1 ? 'Giochi piu semplici, tutto raccontato a voce'
+          : 'Somme, sottrazioni e griglie piu grandi',
+          W / 2, 528, { size: 28, color: C.cream, weight: 700, stroke: 'rgba(12,40,25,.7)', strokeWidth: 8 });
+        G.ui.button({ x: W / 2 - 190, y: H - 116, w: 380, h: 92, r: 26, color: C.leaf, label: 'Avanti', onTap: function () { nu.step = 3; G.say('Scegli tre figure: sara il tuo segreto.'); } });
+      }
+
+      if (nu.step === 3) {
+        G.text('Tocca 3 figure e ricordale bene', W / 2, 132, { size: 28, color: C.cream, weight: 700, stroke: 'rgba(12,40,25,.7)', strokeWidth: 8 });
+        var i;
+        for (i = 0; i < 3; i++) {
+          var sx = W / 2 + (i - 1) * 90, sy = 196;
+          c.save(); c.fillStyle = 'rgba(255,246,224,.32)';
+          c.beginPath(); c.arc(sx, sy, 32, 0, 7); c.fill(); c.restore();
+          if (nu.secret[i] !== undefined) secretIcon(c, sx, sy, 25, nu.secret[i]);
+        }
+        var px = W / 2 - 236, py = 254, cell = 140, gap = 16;
+        for (i = 0; i < 9; i++) {
+          (function (idx) {
+            var bx = px + (idx % 3) * (cell + gap), by = py + Math.floor(idx / 3) * (cell + gap);
+            G.ui.button({
+              id: 'nk' + idx, x: bx, y: by, w: cell, h: cell, r: 24, color: C.cream,
+              disabled: nu.secret.length >= 3,
+              icon: function (cc, cx, cy) { secretIcon(cc, cx, cy, cell * .29, idx); },
+              onTap: function () { nu.secret.push(idx); G.sfx('pop'); }
+            });
+          })(i);
+        }
+        G.ui.button({
+          x: 40, y: H - 116, w: 260, h: 92, r: 26, color: C.bark, label: 'Rifai', fontSize: 34,
+          onTap: function () { nu.secret = []; }
+        });
+        G.ui.button({
+          x: W - 300, y: H - 116, w: 260, h: 92, r: 26, color: C.leafDark, label: 'Senza segreto', fontSize: 24,
+          onTap: function () { nu.secret = []; finish(); }
+        });
+        if (nu.secret.length === 3) {
+          G.ui.button({
+            x: W / 2 - 170, y: H - 116, w: 340, h: 92, r: 26, color: C.leaf, label: 'Fatto!', onTap: finish
+          });
+        }
+      }
+    }
+  });
+
+  function finish() {
+    var a = G.accounts.create({ name: nu.name, color: nu.color, level: nu.level, secret: nu.secret.length === 3 ? nu.secret : null });
+    (G.familyLogin || G.accounts.login)(a.id);
+    G.fx.confetti(); G.sfx('win');
+    G.go('menu');
+    setTimeout(function () { G.say('Buon divertimento, ' + a.name + '!'); }, 900);
+  }
+
+  /* ---------------------------------------------------------- scene: gate */
+  var gt = { a: 0, b: 0, typed: '', then: null, arg: null, back: 'giungla', backArg: null, shake: 0 };
+
+  G.scene('gate', {
+    hud: false, back: false,
+    enter: function (p) {
+      p = p || {};
+      gt.a = G.rndi(6, 9); gt.b = G.rndi(6, 9);
+      gt.typed = ''; gt.shake = 0;
+      gt.then = !p.then || p.then==='genitori' ? 'family-settings' : p.then; gt.arg = p.arg || null;
+      gt.back = p.back || 'giungla'; gt.backArg = p.backArg || null;
+    },
+    update: function (dt) { if (gt.shake > 0) gt.shake = Math.max(0, gt.shake - dt * 4); },
+    draw: function (c) {
+      backdrop(c, null);
+      c.save(); c.fillStyle = 'rgba(8,26,18,.5)'; c.fillRect(0, 0, W, H); c.restore();
+
+      G.text('Solo per i grandi', W / 2, 96, { size: 50, color: C.cream, stroke: 'rgba(0,0,0,.5)', strokeWidth: 10 });
+
+      var jitter = gt.shake > 0 ? Math.sin(G.t * 48) * gt.shake * 12 : 0;
+      c.save();
+      if (window.A && A.panel) A.panel(c, 150 + jitter, 176, 460, 300, { r: 28 });
+      else { c.fillStyle = C.cream; G.roundRect(c, 150 + jitter, 176, 460, 300, 28); c.fill(); }
+      c.restore();
+      G.text(gt.a + ' × ' + gt.b + ' = ?', 380 + jitter, 268, { size: 72, color: C.ink });
+      c.save();
+      c.fillStyle = '#fffdf6'; c.strokeStyle = '#cdb389'; c.lineWidth = 5;
+      G.roundRect(c, 220 + jitter, 336, 320, 96, 20); c.fill(); c.stroke();
+      c.restore();
+      G.text(gt.typed || '–', 380 + jitter, 386, { size: 58, color: C.ink });
+
+      var keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', 'OK'];
+      var kx = 700, ky = 168, kw = 150, kh = 116, kg = 14;
+      keys.forEach(function (k, i) {
+        var x = kx + (i % 3) * (kw + kg), y = ky + Math.floor(i / 3) * (kh + kg);
+        G.ui.button({
+          id: 'g' + k, x: x, y: y, w: kw, h: kh, r: 22,
+          color: k === 'OK' ? C.leaf : k === 'C' ? C.berry : C.cream,
+          textColor: (k === 'OK' || k === 'C') ? '#fff' : C.ink,
+          outline: (k === 'OK' || k === 'C') ? 'rgba(0,0,0,.2)' : 'rgba(0,0,0,0)',
+          label: k, fontSize: 44,
+          onTap: function () {
+            if (k === 'C') { gt.typed = ''; return; }
+            if (k === 'OK') {
+              if (parseInt(gt.typed, 10) === gt.a * gt.b) {
+                G.sfx('good');
+                if (gt.then === '@login') { (G.familyLogin || G.accounts.login)(gt.arg); G.go('menu'); }
+                else G.go(gt.then, gt.arg);
+              } else { gt.shake = 1; gt.typed = ''; G.sfx('bad'); }
+              return;
+            }
+            if (gt.typed.length < 3) gt.typed += k;
+          }
+        });
+      });
+
+      G.ui.button({
+        x: 150, y: H - 108, w: 300, h: 84, r: 24, color: C.bark, label: 'Annulla',
+        onTap: function () { G.go(gt.back, gt.backArg); }
+      });
+    }
+  });
+
+
+  G.scene('genitori',{hud:false,enter:function(){G.go('gate',{then:'family-settings'});}});
+  G.scene('family-settings', {hud:false,back:false,draw:function(c){
+    backdrop(c,'Impostazioni');
+    var a=G.account;
+    if(a) {
+      dinoPreview(c,340,470,230,a.color);
+      G.text(a.name,340,510,{size:40,color:C.cream});
+      G.ui.button({id:'family-age',x:650,y:190,w:460,h:100,color:C.water,label:G.level===1?'Piccolo · 3–4 anni':'Grande · 5–7 anni',onTap:function(){G.level=G.level===1?2:1;G.accounts.update(a.id,{level:G.level});G.saveNow();}});
+      G.ui.button({id:'family-color',x:650,y:315,w:460,h:100,color:C.tangerine,label:'Cambia colore',onTap:function(){G.accounts.update(a.id,{color:COLORS[(COLORS.indexOf(a.color)+1)%COLORS.length]});}});
+    }
+    G.ui.button({id:'family-switch',x:650,y:440,w:460,h:100,color:C.blueberry,label:'Cambia giocatore',onTap:function(){G.accounts.logout();G.go('accesso');}});
+    G.ui.button({id:'family-back',x:650,y:565,w:460,h:100,color:C.leaf,label:'Torna al gioco',onTap:function(){G.go(G.account?'menu':'accesso');}});
+  }});
 })();
 
 

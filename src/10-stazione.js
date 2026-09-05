@@ -22,7 +22,7 @@
     var plan = LEVELS[level - 1];
     var n = plan.tracks, total = plan.total;
     S = {
-      level: level, tracks: n, total: total, schedule: [], next: 0,
+      level: level, tracks: n, total: total, schedule: [], next: 0, switchA: 0, switchB: 0,
       active: [], focus: null, occupied: [null, null, null], departing: [],
       arrived: 0, departed: 0, mistakes: 0, waits: 0, collisions: 0, hint: -1, idle: 0,
       message: 'Tocca il trenino', fine: false, reward: false, plan: plan
@@ -31,7 +31,7 @@
     for (var i = 0; i < total; i++) {
       var target = G.rndi(0, n - 1);
       if (n > 1 && target === last && i % 2) target = (target + 1) % n;
-      S.schedule.push({ target: target, dir: plan.both && i % 2 ? -1 : 1, id: i });
+      S.schedule.push({ target: target, dir: 1, id: i });
       last = target;
     }
     spawn();
@@ -40,10 +40,11 @@
   function spawn() {
     if (S.next >= S.schedule.length || S.fine || S.active.length >= S.plan.maxIncoming) return;
     if (S.plan.maxIncoming === 1 && S.occupied.some(function (v) { return !!v; })) return;
-    var q = S.schedule[S.next++], lane = S.active.length;
+    var q = S.schedule[S.next++], lane = 0;
+    while(S.active.some(function(t){return t.lane===lane;})) lane++;
     S.active.push({
       target: q.target, dir: q.dir, id: q.id, phase: 'choose', p: 0,
-      x: q.dir === 1 ? 118 : W - 118, y: 210 + lane * 48, sourceY: 210 + lane * 48, lane: lane,
+      x: q.dir === 1 ? 118 : W - 118, y: 238 + lane * 148, sourceY: 238 + lane * 148, lane: lane,
       color: TRACK_COL[q.target]
     });
     S.message = S.active.length > 1 ? 'Scegli un trenino da preparare' : 'Tocca il trenino per guardare dove va';
@@ -65,12 +66,12 @@
   }
 
   function trackFreeFor(t) {
-    if (S.occupied[t.target]) return false;
+    if (S.occupied[t.target] || S.departing.some(function(d){return d.target===t.target;})) return false;
     for (var i = 0; i < S.active.length; i++) {
       var other = S.active[i];
       /* L'incrocio e' una risorsa unica: un solo convoglio lo attraversa,
          gli altri restano visibili in attesa del loro verde. */
-      if (S.plan.cross && other !== t && other.phase === 'moving') return false;
+      if (other !== t && other.phase === 'moving') return false;
       if (other !== t && other.target === t.target &&
           (other.phase === 'moving' || (other.phase === 'waiting' && other.id < t.id))) return false;
     }
@@ -110,17 +111,18 @@
     S.idle = 0;
     if (S.active.indexOf(t) >= 0) {
       if (t.phase === 'choose') {
-        t.phase = 'choose-route'; S.focus = t.id; S.hint = t.target;
-        S.message = 'Guarda il simbolo e scegli il binario'; G.sfx('tap');
-        if (S.level === 1) G.say(TRACK_NAME[t.target] + '. Tocca quel simbolo.');
+        t.phase = 'choose-route'; S.focus = t.id; S.hint = -1;
+        S.message = 'Prepara gli scambi, poi dai il via'; G.sfx('tap');
+        G.say('Destinazione ' + TRACK_NAME[t.target] + '. Prepara gli scambi e tocca via.');
         return true;
       }
       if (t.phase === 'choose-route') {
-        S.focus = t.id; S.message = 'Ora tocca il simbolo uguale'; S.hint = t.target;
+        S.focus = t.id; S.message = 'Segui il binario illuminato. Dove arriverà?'; S.hint = -1;
         return true;
       }
       if (t.phase === 'waiting') {
-        S.message = 'Aspetta: passa prima chi ha il binario libero'; G.sfx('tap');
+        if(trackFreeFor(t)){startMoving(t);return true;}
+        S.message = 'Libera prima il binario: fai partire il treno fermo'; G.say(S.message);
         return true;
       }
       return false;
@@ -142,7 +144,7 @@
     S.departing.push(t); S.departed++; S.message = 'Via libera! Buon viaggio!';
     G.sfx('win'); G.fx.confetti(1080, TRACK_Y[track], TRACK_COL[track], 12);
     for (var i = 0; i < S.active.length; i++) {
-      if (S.active[i].phase === 'waiting' && trackFreeFor(S.active[i])) startMoving(S.active[i]);
+      if (S.active[i].phase === 'waiting') S.message = 'Ora guarda il segnale e dai il via al treno in attesa';
     }
     fillIncoming();
     checkDone();
@@ -150,7 +152,7 @@
   }
 
   function checkDone() {
-    if (S.departed < S.total || S.active.length || S.occupied.some(function (v) { return !!v; })) return;
+    if (S.departed < S.total || S.departing.length || S.active.length || S.occupied.some(function (v) { return !!v; })) return;
     S.fine = true; S.message = 'Turno completato! Tutti i treni sono partiti';
     if (!S.reward) {
       S.reward = true;
@@ -171,17 +173,17 @@
   function updateTrains(dt) {
     S.active.forEach(function (a) {
       if (a.phase === 'choose' && S.idle > (S.level === 1 ? 2.6 : 4.5)) S.hint = -2;
-      if (a.phase === 'choose-route' && S.focus === a.id && S.idle > 2.2) S.hint = a.target;
-      if (a.phase === 'waiting' && trackFreeFor(a)) startMoving(a);
+      if (a.phase === 'choose-route' && S.focus === a.id && S.idle > (G.level===1?7:12)) S.hint = a.target;
+      if (a.phase === 'waiting' && trackFreeFor(a)) S.message = 'Via libera! Tocca il treno in attesa';
     });
     for (var ai = S.active.length - 1; ai >= 0; ai--) {
       var a = S.active[ai];
       if (a.phase !== 'moving') continue;
       a.p += dt / 1.15;
-      var e = G.easeInOut(a.p), sx = a.dir === 1 ? 118 : W - 118;
-      a.x = G.lerp(sx, 660, e); a.y = G.lerp(a.sourceY, TRACK_Y[a.target], e);
+      var point = routePoint(a.target, G.clamp(a.p,0,1), a.sourceY);
+      a.x = point.x; a.y = point.y;
       if (a.p >= 1) {
-        a.x = 660; a.y = TRACK_Y[a.target]; a.phase = 'parked'; a.dwell = S.level === 1 ? .45 : .8; a.ready = false;
+        a.x = 820; a.y = TRACK_Y[a.target]; a.phase = 'parked'; a.dwell = S.level === 1 ? .45 : .8; a.ready = false;
         S.occupied[a.target] = a; S.active.splice(ai, 1); S.arrived++;
         if (S.focus === a.id) S.focus = null;
         S.message = 'Aspettiamo i passeggeri...';
@@ -197,41 +199,47 @@
     });
     for (var i = S.departing.length - 1; i >= 0; i--) {
       var d = S.departing[i]; d.p += dt / 1.05;
-      d.x = G.lerp(660, d.dir === 1 ? W + 180 : -180, G.easeIn(d.p));
+      d.x = G.lerp(820, d.dir === 1 ? W + 180 : -180, G.easeIn(d.p));
       if (d.p >= 1) S.departing.splice(i, 1);
     }
     fillIncoming();
     checkDone();
   }
 
+  function selectedRoute(){return S.tracks===1?0:(S.switchA===0?0:(S.tracks===2?1:1+S.switchB));}
+  function launch(){return choose(selectedRoute());}
+  function toggleSwitch(which){
+    if(S.fine || S.active.some(function(t){return t.phase==='moving';}))return;
+    if(which===0)S.switchA=1-S.switchA;else S.switchB=1-S.switchB;
+    S.idle=0;S.hint=-1;G.sfx('tap');
+  }
+  // Every moving train follows the very same geometry as the visible rails.
+  function routePoint(target,p,sourceY){
+    var x,y,t;
+    if(p<.32){t=p/.32;x=G.lerp(118,330,t);y=G.lerp(sourceY,312,G.easeInOut(t));}
+    else if(p<.65){t=(p-.32)/.33;x=G.lerp(330,530,t);y=G.lerp(312,target===0?312:454,G.easeInOut(t));}
+    else{t=(p-.65)/.35;x=G.lerp(530,820,t);y=G.lerp(target===0?312:454,TRACK_Y[target],G.easeInOut(t));}
+    return{x:x,y:y};
+  }
+  function railPath(c,target,sourceY){
+    c.beginPath();for(var j=0;j<=40;j++){var q=routePoint(target,j/40,sourceY);if(j)c.lineTo(q.x,q.y);else c.moveTo(q.x,q.y);}c.lineTo(1280,TRACK_Y[target]);
+  }
   function rails(c) {
-    c.fillStyle = '#d4bf95'; c.fillRect(0, 202, W, H - 202);
-    if (S.plan.cross) {
-      c.save();
-      c.strokeStyle = '#62594e'; c.lineWidth = 8;
-      c.beginPath(); c.moveTo(360, 255); c.lineTo(850, 545); c.stroke();
-      c.beginPath(); c.moveTo(360, 545); c.lineTo(850, 255); c.stroke();
-      c.strokeStyle = '#8b765b'; c.lineWidth = 5;
-      for (var crossX = 430; crossX < 825; crossX += 58) {
-        var crossY = 255 + (crossX - 360) * 290 / 490;
-        c.beginPath(); c.moveTo(crossX - 12, crossY + 12); c.lineTo(crossX + 12, crossY - 12); c.stroke();
-      }
-      c.fillStyle = 'rgba(255,246,224,.94)'; G.roundRect(c, 830, 650, 390, 44, 18); c.fill();
-      G.text('INCROCIO: passa chi ha il verde', 1025, 672, { ctx: c, size: 18, color: C.ink });
-      c.restore();
+    c.fillStyle='#aac690';c.fillRect(0,218,W,H-218);
+    c.fillStyle='#7baf82';for(var bush=0;bush<9;bush++){c.beginPath();c.ellipse(245+bush*128,680,48,24,0,0,7);c.fill();}
+    for(var i=0;i<S.tracks;i++){
+      c.lineCap='round';railPath(c,i,238);c.strokeStyle='#b4a185';c.lineWidth=34;c.stroke();
+      railPath(c,i,238);c.strokeStyle='#5a615d';c.lineWidth=20;c.stroke();
+      railPath(c,i,238);c.strokeStyle='#e0d6bd';c.lineWidth=12;c.stroke();
+      c.fillStyle='#f7ebd1';G.roundRect(c,738,TRACK_Y[i]-51,300,86,20);c.fill();
+      c.fillStyle='#aa8663';c.fillRect(750,TRACK_Y[i]+33,275,8);
+      A.destination(c,982,TRACK_Y[i]-16,27,i);
     }
-    for (var i = 0; i < S.tracks; i++) {
-      var y = TRACK_Y[i];
-      c.fillStyle = 'rgba(255,255,255,.44)'; G.roundRect(c, 172, y - 53, 835, 106, 20); c.fill();
-      c.strokeStyle = '#62594e'; c.lineWidth = 8;
-      c.beginPath(); c.moveTo(0, 220); c.bezierCurveTo(210, 220, 220, y, 405, y); c.lineTo(W, y); c.stroke();
-      c.beginPath(); c.moveTo(0, 238); c.bezierCurveTo(210, 238, 220, y + 18, 405, y + 18); c.lineTo(W, y + 18); c.stroke();
-      c.strokeStyle = '#8b765b'; c.lineWidth = 5;
-      for (var x = 220; x < W; x += 52) { c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x, y + 27); c.stroke(); }
-      c.fillStyle = TRACK_COL[i]; G.roundRect(c, 246, y - 45, 150, 54, 17); c.fill();
-      A.destination(c, 275, y - 18, 21, i);
-      G.text('Binario ' + (i + 1), 300, y - 18, { ctx: c, size: 20, align: 'left', color: C.ink });
-    }
+    var selected=selectedRoute();
+    c.save();railPath(c,selected,238);c.strokeStyle='#ffdc78';c.lineWidth=6;c.stroke();c.restore();
+    // Waiting sidings reconnect to the first switch, never float over scenery.
+    S.active.forEach(function(t){if(t.lane){railPath(c,selected,t.sourceY);c.strokeStyle='#687269';c.lineWidth=4;c.stroke();}});
+    G.text('1',330,282,{size:22,color:C.ink});if(S.tracks>2)G.text('2',530,425,{size:22,color:C.ink});
   }
 
   function draw(c) {
@@ -241,21 +249,17 @@
     c.fillStyle = 'rgba(255,246,224,.94)'; G.roundRect(c, 310, 154, 660, 62, 24); c.fill();
     G.text(S.message, 640, 185, { ctx: c, size: 25, color: C.ink, maxWidth: 620 });
 
-    var routing = !!focusedTrain();
-    for (var i = 0; i < S.tracks; i++) (function (idx) {
-      var pulse = routing && S.hint === idx ? 1 + Math.sin(G.t * 7) * .08 : 1;
-      G.ui.round({
-        id: 'route-' + idx, x: 105, y: TRACK_Y[idx], r: 46 * pulse, color: TRACK_COL[idx], disabled: !routing,
-        icon: function (cc, x, y) { A.destination(cc, x, y, 25, idx); },
-        onTap: function () { choose(idx); }
-      });
-      var occ = S.occupied[idx];
-      A.signal(c, 1085, TRACK_Y[idx] - 18, 34, !!(occ && occ.ready));
-    })(i);
-
+    var routing=!!focusedTrain(), locked=S.active.some(function(t){return t.phase==='moving';});
+    function lever(which,x,y,value){c.strokeStyle='#647364';c.lineWidth=3;c.setLineDash([5,7]);c.beginPath();c.moveTo(x,y-48);c.lineTo(x,which===0?326:468);c.stroke();c.setLineDash([]);G.ui.button({id:'switch-'+which,x:x-52,y:y-48,w:104,h:96,r:26,color:locked?'#a4ada2':C.cream,disabled:locked,
+      icon:function(cc,cx,cy){cc.strokeStyle=C.ink;cc.lineWidth=7;cc.lineCap='round';cc.beginPath();cc.moveTo(cx,cy+20);cc.lineTo(cx+(value?24:-24),cy-22);cc.stroke();cc.fillStyle=C.tangerine;cc.beginPath();cc.arc(cx+(value?24:-24),cy-22,14,0,7);cc.fill();},
+      onTap:function(){toggleSwitch(which);}});}
+    if(S.tracks>1)lever(0,330,410,S.switchA);
+    if(S.tracks>2)lever(1,530,563,S.switchB);
+    G.ui.button({id:'station-go',x:1060,y:112,w:180,h:104,r:28,color:C.leaf,label:'VIA',disabled:!routing,onTap:launch});
+    for(var sig=0;sig<S.tracks;sig++)A.signal(c,1120,TRACK_Y[sig]-20,30,!!(S.occupied[sig]&&S.occupied[sig].ready));
     S.occupied.forEach(function (t, idx) {
       if (!t) return;
-      A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir });
+      A.train(c, t.x, t.y, 100, { color: t.color, kind: t.target, dir: t.dir });
       G.ui.button({ id: 'parked-' + idx, x: t.x - 92, y: t.y - 86, w: 184, h: 148, r: 54, ghost: true,
         onTap: function () { tapTrain(t, idx); } });
       if (t.ready) {
@@ -263,9 +267,9 @@
         c.beginPath(); c.arc(t.x, t.y - 12, 92, 0, 7); c.stroke(); c.restore();
       }
     });
-    S.departing.forEach(function (t) { A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir }); });
+    S.departing.forEach(function (t) { A.train(c, t.x, t.y, 100, { color: t.color, kind: t.target, dir: t.dir }); });
     S.active.forEach(function (t) {
-      A.train(c, t.x, t.y, 125, { color: t.color, kind: t.target, dir: t.dir });
+      A.train(c, t.x, t.y, 100, { color: t.color, kind: t.target, dir: t.dir });
       G.ui.button({ id: 'active-train-' + t.id, x: t.x - 92, y: t.y - 86, w: 184, h: 148, r: 54, ghost: true,
         onTap: function () { tapTrain(t); } });
       if (t.phase === 'choose') {
@@ -278,11 +282,6 @@
       }
     });
 
-    if (S.plan.both && S.next < S.schedule.length) {
-      c.fillStyle = 'rgba(255,246,224,.92)'; G.roundRect(c, W - 205, 112, 165, 92, 22); c.fill();
-      G.text('Prossimo', W - 122, 136, { ctx: c, size: 18, color: C.ink });
-      A.destination(c, W - 122, 173, 26, S.schedule[S.next].target);
-    }
     if (S.fine) {
       c.fillStyle = 'rgba(31,55,42,.80)'; c.fillRect(0, 0, W, H);
       c.fillStyle = C.cream; G.roundRect(c, 280, 130, 720, 460, 42); c.fill();
@@ -301,7 +300,7 @@
   G.stationState = function () {
     var focused = focusedTrain() || S.active[0];
     return {
-      level: S.level, tracks: S.tracks, total: S.total, next: S.next,
+      level: S.level, tracks: S.tracks, total: S.total, next: S.next, route: selectedRoute(), switches:[S.switchA,S.switchB],
       cross: !!S.plan.cross, maxIncoming: S.plan.maxIncoming,
       active: focused && { id: focused.id, target: focused.target, phase: focused.phase },
       actives: S.active.map(function (t) { return { id: t.id, target: t.target, phase: t.phase }; }),
@@ -314,6 +313,9 @@
     };
   };
   G.stationChoose = choose;
+  G.stationToggle = toggleSwitch;
+  G.stationLaunch = launch;
+  G.stationRoutePoint = routePoint;
   G.stationDepart = depart;
   G.stationTapTrain = function (id) {
     for (var a = 0; a < S.active.length; a++) {
