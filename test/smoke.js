@@ -1,181 +1,93 @@
 #!/usr/bin/env node
+/* Dino Stazione — collaudo. `node test/smoke.js`
+   A controller bot plays every map at both ages through the real step(): it
+   must bring every train home with no crash. The passive player must earn no
+   star, and Piccolo's self-braking trains must never crash nor jam. */
 'use strict';
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const ROOT = path.join(__dirname, '..');
-const SRC = path.join(ROOT, 'src');
-const failures = [];
-let phase = 'boot', clock = 0, drawCount = 0;
-const noop = function () {};
-function fail(s) { failures.push('[' + phase + '] ' + s); }
+const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert');
+const noop=()=>{},store=new Map(),scenes={},events={};
+const context=new Proxy({},{get(t,k){if(k in t)return t[k];if(k==='measureText')return s=>({width:String(s).length*10});if(k==='createLinearGradient'||k==='createRadialGradient')return()=>({addColorStop:noop});return noop;},set(t,k,v){t[k]=v;return true;}});
+const elements={};function element(id){return elements[id]||(elements[id]={style:{},classList:{add:noop,remove:noop,toggle:noop,contains:()=>false},getContext:()=>context,addEventListener:noop,getBoundingClientRect:()=>({left:0,top:0}),focus:noop,blur:noop,select:noop});}
+const sandbox={console,Math,Date,JSON,innerWidth:1280,innerHeight:720,devicePixelRatio:2,performance:{now:()=>0},navigator:{},localStorage:{getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v),removeItem:k=>store.delete(k)},document:{hidden:false,getElementById:element,documentElement:{},addEventListener:(n,f)=>events[n]=f},addEventListener:(n,f)=>events[n]=f,requestAnimationFrame:noop,setTimeout:noop,clearTimeout:noop,setInterval:noop,matchMedia:()=>({matches:false}),speechSynthesis:{getVoices:()=>[],speak:noop,cancel:noop,addEventListener:noop},SpeechSynthesisUtterance:function(){}};
+sandbox.window=sandbox;vm.createContext(sandbox);
+const dir=path.join(__dirname,'../src');
+for(const file of fs.readdirSync(dir).filter(f=>f.endsWith('.js')).sort()){
+  vm.runInContext(fs.readFileSync(path.join(dir,file),'utf8'),sandbox,{filename:file});
+  if(file==='00-core.js'){const original=sandbox.G.scene;sandbox.G.scene=(name,s)=>{scenes[name]=s;original(name,s);};}
+}
+const G=sandbox.G,T=G.traffic,S=()=>T.state();
+const kid=G.accounts.create({name:'Prova',level:1});G.accounts.login(kid.id);
+T.quiet(true);
 
-function gradient() { return { addColorStop: noop }; }
-function context() {
-  const store = {};
-  return new Proxy(store, {
-    get(t, k) {
-      if (k in t) return t[k];
-      if (k === 'createLinearGradient' || k === 'createRadialGradient') return gradient;
-      if (k === 'measureText') return s => ({ width: String(s).length * 9 });
-      if (typeof k === 'symbol') return undefined;
-      return function () {
-        drawCount++;
-        for (const v of arguments) if (typeof v === 'number' && !Number.isFinite(v)) fail('canvas ' + String(k) + ' riceve ' + v);
-      };
-    },
-    set(t, k, v) { if (typeof v === 'number' && !Number.isFinite(v)) fail('canvas.' + String(k) + ' = ' + v); t[k] = v; return true; }
+const rules=fs.readFileSync(path.join(dir,'10-stazione.js'),'utf8').split('/* ================================================================ drawing */')[0].replace(/\/\*[\s\S]*?\*\//g,'');
+assert(!/Math\.random|G\.rnd|G\.pick|G\.shuffle/.test(rules),'the rules must use the seeded rnd()');
+
+// ---- every map is a sound graph
+T.MAPS.forEach(m=>{
+  const g=T.build(m);
+  Object.values(g.nodes).forEach(n=>{
+    const want={entry:1,switch:2,merge:1,station:0}[n.t];assert.equal(n.out.length,want,m.name+' '+n.id+' has '+n.out.length+' exits');
+    if(n.t==='switch')n.out.forEach(o=>assert(g.edges[o].reach.length,m.name+' '+n.id+' leads nowhere'));
+  });
+  g.entries.forEach(e=>assert(g.edges[g.nodes[e].out[0]].reach.length>=2,m.name+': every entry must offer a choice'));
+  const stations=Object.values(g.nodes).filter(n=>n.t==='station').map(n=>n.col);assert.equal(new Set(stations).size,stations.length,'one station per colour');
+});
+
+// ---- the bot: route every train, and (Grande) hold the younger of two trains about to meet
+function lookahead(tr,dist){const g=T.graph(),st=S();let e=tr.e,d=tr.d;const out=[];for(let k=12;k<=dist;k+=12){let dd=d+k,ee=e;while(ee>=0&&dd>g.edges[ee].len){dd-=g.edges[ee].len;const n=g.nodes[g.edges[ee].to];ee=n.t==='station'?-1:n.t==='switch'?n.out[st.sw[n.id]]:n.out[0];}if(ee<0)break;const i=Math.min(g.edges[ee].pts.length-1,Math.floor(dd/3));out.push({x:g.edges[ee].pts[i][0],y:g.edges[ee].pts[i][1],e:ee});}return out;}
+function bot(){
+  const g=T.graph(),st=S();
+  // switches: serve the closest train heading for them
+  Object.keys(st.sw).forEach(k=>{
+    let best=null,bd=1e9;
+    st.trains.forEach(t=>{let e=t.e,dist=g.edges[e].len-t.d;for(let hop=0;hop<4&&e>=0;hop++){const n=g.nodes[g.edges[e].to];if(n.id===k){if(dist<bd){bd=dist;best=t;}break;}if(n.t==='station')break;e=n.t==='switch'?n.out[st.sw[n.id]]:n.out[0];dist+=g.edges[e].len;}});
+    if(best){const n=g.nodes[k],want=g.edges[n.out[0]].reach.includes(best.col)?0:1;if(st.sw[k]!==want)T.toggle(k);}
+  });
+  if(G.level!==2)return;
+  st.trains.forEach(t=>{t.hold=false;});
+  const trains=st.trains.slice().sort((a,b)=>a.id-b.id);
+  trains.forEach((t,i)=>{
+    const look=lookahead(t,130),mine=new Set([t.e].concat(look.map(p=>p.e)));
+    for(const o of trains.slice(0,i)){
+      if(mine.has(o.e))continue;   // following: the game brakes by itself
+      const theirs=lookahead(o,130).concat(o.cars.map(c=>({x:c.x,y:c.y})));
+      if(look.some(p=>theirs.some(q=>Math.hypot(p.x-q.x,p.y-q.y)<42))){t.hold=true;break;}
+    }
   });
 }
-function classes() {
-  const s = new Set();
-  return { add: x => s.add(x), remove: x => s.delete(x), contains: x => s.has(x), toggle: (x, on) => on ? s.add(x) : s.delete(x) };
+function play(li,level,seed,withBot){
+  G.level=level;T.reset(li,seed);T.start();
+  for(let f=0;f<60*60*12&&S().phase==='play';f++){if(withBot)bot();T.step();}
+  const s=S();return {phase:s.phase,ok:s.ok,n:T.rules().n,bad:s.bad,crashes:s.crashes,hearts:s.hearts};
 }
-const els = {};
-function element(id) {
-  const listeners = {};
-  return {
-    id, listeners, style: {}, classList: classes(), value: '', textContent: '',
-    addEventListener: (t, f) => (listeners[t] = listeners[t] || []).push(f),
-    dispatch: (t, e) => (listeners[t] || []).forEach(f => f(e)),
-    getContext: () => element.ctx || (element.ctx = context()),
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 1600, height: 900 }),
-    setPointerCapture: noop, focus: noop, blur: noop, select: noop,
-    requestFullscreen: () => Promise.resolve()
-  };
-}
-['c', 'ovl', 'ovl-t', 'ovl-i', 'ovl-y', 'ovl-n', 'rot'].forEach(id => { els[id] = element(id); });
-
-const timers = [];
-function setTimer(fn, ms) { const t = { fn, at: clock + (ms || 0), id: timers.length + 1 }; timers.push(t); return t.id; }
-function clearTimer(id) { const i = timers.findIndex(t => t.id === id); if (i >= 0) timers.splice(i, 1); }
-function flushTimers() {
-  for (let guard = 0; guard < 200; guard++) {
-    const due = timers.filter(t => t.at <= clock); if (!due.length) return;
-    due.forEach(t => { timers.splice(timers.indexOf(t), 1); try { t.fn(); } catch (e) { fail('timer: ' + e.message); } });
+for(const level of [1,2])T.MAPS.forEach((m,li)=>{
+  for(const seed of [3,77]){
+    const r=play(li,level,seed,true);
+    assert(r.phase==='clear'&&r.ok===r.n&&r.crashes===0,`bot on ${m.name} (${level===1?'Piccolo':'Grande'}, seed ${seed}): ${JSON.stringify(r)}`);
   }
-}
+  const p=play(li,level,5,false);
+  const bc=[3,77].length;console.log(`  ${m.name.padEnd(26)} ${level===1?'Piccolo':'Grande '}  bot 3 stelle · passivo ${JSON.stringify(p)}`);
+  assert(p.ok/p.n<.6,'touching nothing must not earn a star on '+m.name);
+  if(level===1){assert.equal(p.phase,'clear','Piccolo trains must never jam on '+m.name);assert.equal(p.crashes,0,'Piccolo trains must never crash');}
+  else assert(p.phase==='over'||p.ok/p.n<.6);
+});
 
-const storage = new Map();
-const W = {
-  innerWidth: 1600, innerHeight: 900, devicePixelRatio: 1, listeners: {},
-  addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
-  removeEventListener: noop, matchMedia: () => ({ matches: false }),
-  requestAnimationFrame(f) { W.raf = f; return 1; }, cancelAnimationFrame: noop,
-  setTimeout: setTimer, clearTimeout: clearTimer, setInterval: () => 0, clearInterval: noop,
-  navigator: { wakeLock: null }, performance: { now: () => clock },
-  localStorage: { getItem: k => storage.has(k) ? storage.get(k) : null, setItem: (k, v) => storage.set(k, String(v)), removeItem: k => storage.delete(k) },
-  speechSynthesis: { speak: noop, cancel: noop, getVoices: () => [], addEventListener: noop },
-  SpeechSynthesisUtterance: function (s) { this.text = s; },
-  AudioContext: function () {
-    const node = () => ({ connect: noop, start: noop, stop: noop, gain: { value: 0, setValueAtTime: noop, exponentialRampToValueAtTime: noop }, frequency: { value: 0, setValueAtTime: noop, exponentialRampToValueAtTime: noop }, Q: {}, buffer: null });
-    this.currentTime = 0; this.state = 'running'; this.sampleRate = 44100; this.destination = node();
-    this.createGain = node; this.createOscillator = node; this.createBufferSource = node; this.createBiquadFilter = node;
-    this.createBuffer = (c, n) => ({ getChannelData: () => new Float32Array(n) }); this.resume = () => Promise.resolve();
-  }
-};
-W.document = {
-  hidden: false, fullscreenElement: null, documentElement: element('html'), body: element('body'), listeners: {},
-  getElementById: id => els[id] || element(id), createElement: element,
-  addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
-  removeEventListener: noop, exitFullscreen: () => Promise.resolve()
-};
-W.window = W; W.self = W; W.globalThis = W; W.console = { log: noop, info: noop, warn: (...a) => fail('warn: ' + a.join(' ')), error: (...a) => fail('error: ' + a.join(' ')) };
-vm.createContext(W);
-const files = fs.readdirSync(SRC).filter(f => f.endsWith('.js')).sort();
-try { vm.runInContext(files.map(f => fs.readFileSync(path.join(SRC, f), 'utf8')).join('\n;\n'), W, { filename: 'bundle.js' }); }
-catch (e) { console.error('✗ bundle non avviato\n' + e.stack); process.exit(1); }
-const G = W.G;
-function pump(n) {
-  for (let i = 0; i < n; i++) { clock += 16.7; flushTimers(); try { W.raf(clock); } catch (e) { fail('frame: ' + e.message); } }
-}
-function tap(x, y) {
-  const e = { clientX: G.view.ox + x * G.view.s, clientY: G.view.oy + y * G.view.s, pointerId: 1, preventDefault: noop };
-  els.c.dispatch('pointerdown', e); pump(1); els.c.dispatch('pointerup', e); pump(1);
-}
+// ---- the real tap: a switch flips, a train stops and goes again
+G.level=2;T.reset(0,1);T.start();const sw0=S().sw.S1;T.tap({x:380,y:430});assert.equal(S().sw.S1,1-sw0,'tapping the switch flips it');
+for(let i=0;i<60*5&&!S().trains.length;i++)T.step();for(let i=0;i<120;i++)T.step();
+const tr=S().trains[0],c0=tr.cars[0];T.tap({x:c0.x,y:c0.y});assert(tr.hold,'tapping a train holds it');const d0=tr.d;for(let i=0;i<60;i++)T.step();assert.equal(S().trains[0].d,d0,'a held train does not move');T.tap({x:S().trains[0].cars[0].x,y:S().trains[0].cars[0].y});assert(!S().trains[0].hold);
 
-console.log('Dino Stazione — collaudo headless');
-console.log('moduli: ' + files.join(', ') + '\n');
-phase = 'account';
-const a = G.accounts.create({ name: 'Prova', color: G.C.berry, level: 2 });
-if (!G.accounts.login(a.id)) fail('login fallito');
-G.start('menu'); pump(40);
-if (G.current !== 'menu') fail('menu non raggiunto');
-if (drawCount < 300) fail('menu quasi vuoto');
+// ---- a crash in Grande costs a heart; in Piccolo the same trains just wait
+for(const level of [2,1]){G.level=level;T.reset(2,9);T.start();const R=T.rules(),keep=R.every;R.every=1.2;S().sw.S1=1;S().sw.S2=1;S().hearts=99;
+  for(let f=0;f<60*90&&S().phase==='play'&&!S().crashes;f++)T.step();
+  R.every=keep;if(level===2)assert(S().crashes>0&&S().hearts<99,'two trains meeting at the merge must crash in Grande');else assert.equal(S().crashes,0,'Piccolo never crashes');}
 
-phase = 'tocca il trenino';
-G.start('stazione', { level: 1 }); pump(20);
-tap(118, 206);
-if (!G.stationState().active || G.stationState().active.phase !== 'choose-route') {
-  fail('toccando il trenino non si apre la scelta del binario');
-}
-pump(2); // un frame registra i binari appena aperti per il secondo tocco reale
-tap(1140, 160);
-if (!G.stationState().active || G.stationState().active.phase !== 'moving') {
-  fail('il binario non riceve il tap dopo aver toccato il trenino');
-}
+// ---- stars unlock the next map, and profiles stay apart
+delete G.save.traffico;G.level=1;play(0,1,4,true);assert.equal(T.saved().open,1);assert.equal(T.saved().best[0],3);
+const sib=G.accounts.create({name:'Fratello',level:2});G.accounts.login(sib.id);assert.equal(G.save.traffico,undefined,'sibling save leaked');G.accounts.login(kid.id);assert.equal(T.saved().open,1);
 
-function completeLevel(level) {
-  phase = 'turno ' + level;
-  G.start('stazione', { level }); pump(20);
-  let guard = 0, maxConcurrent = 0, maxMoving = 0, sawWaiting = false;
-  while (!G.stationState().fine && guard++ < 5000) {
-    const s = G.stationState();
-    maxConcurrent = Math.max(maxConcurrent, s.activeCount || 0);
-    maxMoving = Math.max(maxMoving, s.moving || 0);
-    sawWaiting = sawWaiting || (s.waiting || 0) > 0;
-    (s.actives || []).forEach(t => {
-      if (t.phase === 'choose') {
-        G.stationTapTrain(t.id);
-        const opened = (G.stationState().actives || []).find(x => x.id === t.id);
-        if (opened && opened.phase === 'choose-route') G.stationChoose(opened.target);
-      } else if(t.phase === 'waiting'){G.stationTapTrain(t.id);
-      } else if (t.phase === 'choose-route') {
-        G.stationTapTrain(t.id);
-        G.stationChoose(t.target);
-      }
-    });
-    s.occupied.forEach((t, i) => { if (t && t.ready) G.stationDepart(i); });
-    pump(1);
-  }
-  const end = G.stationState();
-  if (!end.fine) fail('turno non finito entro il limite');
-  if (end.departed !== end.total) fail('partiti ' + end.departed + ' su ' + end.total);
-  if (end.arrived !== end.total) fail('arrivati ' + end.arrived + ' su ' + end.total);
-  if (end.collisions !== 0) fail('collisioni registrate: ' + end.collisions);
-  if (level >= 5 && !end.cross) fail('incrocio non attivo al turno ' + level);
-  if (level >= 5 && maxMoving > 1) fail('due treni attraversano insieme l incrocio al turno ' + level);
-  if (level >= 7 && maxConcurrent < 2) fail('mancano due trenini contemporanei al turno ' + level);
-  if (level >= 10 && maxConcurrent < 3) fail('mancano tre trenini contemporanei al turno ' + level);
-  if (level >= 10 && !sawWaiting) fail('nessun treno rispetta la precedenza al turno ' + level);
-}
-completeLevel(1);
-pump(2);
-tap(640, 538); // Prossimo! nella schermata completata
-pump(4);
-if (G.stationState().level !== 2 || G.stationState().fine) fail('Prossimo non apre il turno 2');
-for (let level = 2; level <= 12; level++) completeLevel(level);
-
-phase = 'errore dolce';
-G.start('stazione', { level: 3 }); pump(20);
-let s = G.stationState();
-G.stationTapTrain();
-if (G.stationState().active.phase !== 'choose-route') fail('il treno non resta il primo passo anche al livello 3');
-const wrong = (s.active.target + 1) % s.tracks;
-if (G.stationChoose(wrong)) fail('un binario sbagliato è stato accettato');
-if (G.stationState().mistakes !== 1) fail('errore non registrato');
-if (!G.stationChoose(s.active.target)) fail('correzione giusta rifiutata');
-pump(100);
-if (!G.stationState().occupied.some(Boolean)) fail('il treno corretto non arriva al binario');
-
-phase = 'salvataggio';
-const save = G.stationSave();
-if (save.maxLevel !== 12) fail('progressione non sblocca tutti i turni: ' + save.maxLevel);
-if (save.served < 66) fail('treni serviti non salvati: ' + save.served);
-try { const j = JSON.stringify(G.save); if (/NaN|Infinity/.test(j)) fail('salvataggio non finito'); } catch (e) { fail('salvataggio non serializzabile'); }
-
-console.log('');
-if (failures.length) {
-  console.log('✗ ' + failures.length + ' problemi:\n'); failures.slice(0, 40).forEach(x => console.log('  · ' + x)); process.exit(1);
-}
-console.log('✓ collaudo pulito — 12 turni, tocchi sul treno, scambi e progressione');
+// ---- scenes draw
+for(const name of ['accesso','menu','stazione']){if(scenes[name].enter)scenes[name].enter({level:0});scenes[name].draw(context);}
+['ready','play','pause','clear','over'].forEach(ph=>{S().phase=ph;scenes.stazione.draw(context);});
+for(let li=0;li<T.MAPS.length;li++){scenes.stazione.enter({level:li});S().phase='play';scenes.stazione.draw(context);}
+console.log('PASS Dino Stazione: bot routes every map at both ages with no crash, passive player earns no star, Piccolo never crashes nor jams, taps, holds, unlocks, separate saves');
